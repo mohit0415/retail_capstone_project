@@ -23,6 +23,7 @@ def print_result(result) -> None:
         f"via {result.parsed_with}, doc_type={result.doc_type} v{result.version}"
         + (f", superseded {result.superseded} older node(s)" if result.superseded else "")
     )
+    print(f"    routed to {result.parsed_with} because {result.parse_reason}")
 
 
 def main() -> None:

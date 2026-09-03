@@ -67,8 +67,8 @@ or it hands the question to a person.
 | Component | Where | What it does here |
 |---|---|---|
 | **LlamaIndex** | `src/index/`, `src/retrieval/`, `src/tools/` | Owns the whole knowledge layer: `VectorStoreIndex` over `PGVectorStore`, the retrievers, the postprocessors, the query engines and the tool abstraction |
-| **LlamaParse** | `src/ingestion/parser.py` | Parses PDFs and DOCX that contain tables or diagrams into clause-preserving markdown |
-| **LangChain** | `src/ingestion/splitters.py`, every node under `src/nodes/` | `RecursiveCharacterTextSplitter` for deterministic fallback chunking; `langchain-core` structured output is the contract every graph node returns |
+| **LlamaParse** | `src/ingestion/router.py`, `src/ingestion/loaders/llamaparse_loader.py` | Parses PDFs and DOCX that contain tables or diagrams into clause-preserving markdown |
+| **LangChain** | `src/ingestion/processors/splitters.py`, every node under `src/nodes/` | `RecursiveCharacterTextSplitter` for deterministic fallback chunking; `langchain-core` structured output is the contract every graph node returns |
 | **LangGraph** | `src/graph/` | The orchestration state machine — typed state, conditional edges, checkpointer, the bounded reflection cycle |
 | **Agentic RAG** | `src/nodes/agentic_rag.py` | A `ReActAgent` that reasons over the policy tool, the SQL tool and the MCP tools — the fifth execution path |
 | **Tools (MCP)** | `src/tools/mcp_tools.py`, `src/tools/registry.py` | `BasicMCPClient` + `McpToolSpec`, allow-listed and output-clamped |
@@ -76,8 +76,8 @@ or it hands the question to a person.
 | **BM25** | `src/retrieval/fusion.py` | `BM25Retriever` built over the in-scope docstore nodes — the lexical leg |
 | **Fusion retrieval** | `src/retrieval/fusion.py` | `QueryFusionRetriever` combining the dense and lexical legs |
 | **Reciprocal re-ranking** | `src/retrieval/fusion.py` | `mode="reciprocal_rerank"` — RRF over the two ranked lists |
-| **RecursiveTextSplitter** | `src/ingestion/splitters.py` | LangChain `RecursiveCharacterTextSplitter`, separator-aware, used as the bounded fallback |
-| **SemanticNodeSplitter** | `src/ingestion/splitters.py` | LlamaIndex `SemanticSplitterNodeParser`, the primary chunker |
+| **RecursiveTextSplitter** | `src/ingestion/processors/splitters.py` | LangChain `RecursiveCharacterTextSplitter`, separator-aware, used as the bounded fallback |
+| **SemanticNodeSplitter** | `src/ingestion/processors/splitters.py` | LlamaIndex `SemanticSplitterNodeParser`, the primary chunker |
 | **Guardrails** | `src/guardrails/` | Guardrails AI `DetectPII`, Presidio and regex PII, prompt-injection filter, scope check, SQL intent guard, citation enforcement |
 | **Human escalation** | `src/nodes/escalation.py`, `src/core/handoff.py`, `src/api/routes.py` | LangGraph interrupt + checkpoint, escalation queue, reviewer console endpoints, SMTP notification with a reference id |
 
@@ -380,12 +380,19 @@ want of correct behaviour.
 configs/            settings, LangChain model tiering, database pool
 data/policies/      the corpus (you supply the documents)
 data/sql/           schema.sql and seed.sql for the operational tables
-scripts/            init_db.py, ingest_policies.py
+scripts/            init_db.py, ingest_policies.py, diagnose_ingestion.py
 evals/              golden_set.json and the SLO-checking runner
 src/
   index/            LlamaIndex Settings, Azure model tiers, PGVectorStore index
-  ingestion/        LlamaParse routing, splitters, table and image nodes, metadata, pipeline,
-                    bootstrap (the startup corpus load)
+  ingestion/        the document pipeline, split by the question each layer answers
+    elements.py       the dataclasses the layers hand each other
+    router.py         LlamaParse or LlamaIndex, decided from probe evidence
+    loaders/          the two parsers, text cleaning, the raw-bytes guard
+    extractors/       clause, table, image and drawn-figure elements - no model call
+    processors/       an element becomes a TextNode - every model call lives here
+    metadata/         the metadata contract: enums, structural, inferred, stamping
+    pipeline.py       the orchestration, and the only place the layers meet
+    bootstrap.py      the startup corpus load
   retrieval/        fusion retriever, postprocessors, adapter back to the domain model
   tools/            policy tool, NL2SQL tool, MCP tools, role-scoped registry
   sqlpath/          the guarded NL2SQL engine and the schema notes that prime it
@@ -410,21 +417,89 @@ sixty files.
 
 ## 6. The ingestion pipeline
 
-`scripts/ingest_policies.py` → `src/ingestion/pipeline.py`. Six stages, plus 6.7 on the two ways
-the pipeline gets started.
+`scripts/ingest_policies.py` → `src/ingestion/pipeline.py`. One document goes in, a list of nodes
+carrying complete metadata comes out.
 
-### 6.1 Routing: does this document need LlamaParse?
+### 6.1 The shape of the package
 
-`src/ingestion/parser.py::requires_multimodal_parsing` opens the file with `pdfplumber` (or
-`python-docx`) and asks one question: does any page contain an extractable table or an image? Only
-if the answer is yes does the file go through LlamaParse.
+The package is split by the question each layer answers, not by file type:
 
-This is a cost decision made from evidence rather than from a config flag. LlamaParse is a paid API
-call per page; a markdown policy or a text-only PDF gains nothing from it. Sniffing first means the
-expensive parser is spent only on the documents that actually carry structure — which in a policy
-corpus is the retention schedules and the ISO control matrices, not the prose.
+```
+router.py       Which parser does this document need, and on what evidence?
+loaders/        Turn the file into markdown with that parser.
+extractors/     What is in this markdown? Clauses, tables, images. No model call.
+processors/     Turn one element into one or more TextNodes. Every model call is here.
+metadata/       What must every node carry, and who is allowed to write it?
+pipeline.py     Run those in order, validate the result, insert it.
+```
 
-The parsing instruction passed to LlamaParse is the important part:
+The split is worth stating because the previous version of this package was five flat modules and
+each one did a little of everything: `parser.py` decided the route *and* parsed, `splitters.py`
+found clauses *and* chunked them, `table_nodes.py` found tables *and* summarised them *and* wrote
+their metadata. Metadata written in three places drifts in three directions — that is exactly how a
+table node ends up without the clause number that a citation needs.
+
+Two rules keep the layers honest. **Extractors never call a model**: they are regex, PyMuPDF and
+`dataclass` construction, so they are fast, free and testable without a network. **Processors never
+write metadata by hand**: they ask `metadata/stamping.py` for the dict. There is one function per
+node kind and nothing else in the codebase is allowed to build node metadata.
+
+The data passed between layers is typed. `elements.py` holds `ParseRoute`, `ParsedDocument`,
+`ClauseSection`, `RawTable` and `RawImage` — frozen dataclasses rather than dicts, because a dict
+that has lost its `clause_number` somewhere between the extractor and the processor fails silently,
+and a dataclass that has lost a field does not compile.
+
+### 6.2 The routing decision: LlamaParse or LlamaIndex
+
+This is the distinction the whole ingestion design turns on, so it gets its own module.
+
+**LlamaIndex is the library this system is built on.** It owns the index, the retrievers, the
+postprocessors, the query engines, the tool abstraction and the semantic node parser. It also
+supplies a perfectly good document reader — `SimpleDirectoryReader` — which turns a file into text.
+
+**LlamaParse is a paid, layout-aware parsing service.** It is not a competing library and it is not
+a fallback for when LlamaIndex fails. It does one thing the local reader cannot: it preserves the
+two-dimensional structure of a page. A table stays a markdown table instead of collapsing into a
+row of loose words; a numbered heading stays a heading instead of becoming a line of prose.
+
+So the question is never "which library" but "does this document have layout worth preserving":
+
+| The document | Route | Why |
+|---|---|---|
+| `.md`, `.txt` | LlamaIndex | already structured text, nothing to recover |
+| `.pdf` / `.docx`, no table, image or figure | LlamaIndex | prose reads the same either way, and the local read is free |
+| `.pdf` / `.docx` carrying a table, an image or a drawn figure | LlamaParse | flattening the layout destroys content that cannot be recovered downstream |
+| anything the probe cannot open | LlamaIndex | fall back to the reader that at least returns text, and record why |
+
+`src/ingestion/router.py::choose_route` makes that call. It opens the file with `pdfplumber` (or
+`python-docx`) and counts the pages that carry an extractable table, an embedded image, or a
+**drawn figure** (section 6.4). It returns a `ParseRoute` holding the parser, the evidence flags, and **a sentence saying
+why** — for example *"2 page(s) carry a table and 1 page(s) carry an image, so the layout has to
+survive the parse"*.
+
+That sentence is not logging decoration. It is stamped onto every node the document produces as
+`parse_reason`, so months later the answer to "why does this policy have no table nodes?" is in the
+row itself rather than in a log file that has rotated away. `scripts/diagnose_ingestion.py` prints
+it for the whole corpus without ingesting anything.
+
+The evidence is what makes this a decision rather than a configuration flag. LlamaParse is billed
+per page; a markdown policy or a prose-only PDF gains nothing from it. In this corpus that means
+the paid parser is spent on the retention schedules and the ISO control matrices, and not on the
+seven-eighths of the text that is ordinary prose.
+
+One thing the router deliberately does not do: it never downgrades a LlamaParse decision to the
+plain reader when `LLAMAPARSE_API_KEY` is missing. `loaders/llamaparse_loader.py` raises instead.
+A silent downgrade would return text that looks complete — the prose is all there — with every
+retention period and every control threshold quietly flattened into an unreadable run of words. A
+failure that looks like success is worse than a failure.
+
+### 6.3 The two loaders
+
+Both loaders return clean markdown and nothing else. Neither knows anything about clauses, nodes or
+metadata.
+
+`loaders/llamaparse_loader.py` carries the parsing instruction, and the instruction is the
+important part:
 
 > Preserve every clause number and section heading exactly as printed, including numbering such as
 > 4.1, A.8.15 or Article 17. Render tables as markdown tables. Do not summarise, reorder or
@@ -434,74 +509,200 @@ Every citation this system emits is a clause number. A parser that silently renu
 destroys the one identifier the whole answer contract is built on, so the instruction says so in as
 many words.
 
-### 6.2 Metadata: structural, then inferred
+`loaders/llamaindex_loader.py` reads `.md` and `.txt` directly and hands everything else to
+`SimpleDirectoryReader`. It then checks the result for two failure modes that otherwise reach the
+index disguised as content: text that begins with `%PDF-` or `PK\x03\x04` (the reader package is
+not installed, so the raw bytes came back as a string), and text that is empty (a scanned document
+with no text layer, which needs OCR, not indexing). Both raise with the fix in the message.
 
-`src/ingestion/policy_metadata.py` builds two layers. **Structural** metadata comes from the file
-and its frontmatter — `doc_type`, `document_title`, `version`, `effective_date`, `file_hash`,
-`parsed_with`, `embed_model`. **Inferred** metadata comes from one small-model call over the first
-3000 characters — `topic`, `keywords`, `owning_department`, `content_domain`, `intended_route`.
+`loaders/cleaning.py` runs on the output of both: NFC normalisation and control-character
+stripping. A stray `\x00` from a PDF text layer will abort a Postgres insert several stages later,
+where the error names the column and not the document.
 
-Every inferred field is a closed enum validated against an allow-list after the model returns. An
-open-vocabulary metadata field cannot be filtered on reliably, because the model will invent a new
-spelling for the same concept on the next document and the filter silently stops matching. Closed
-enums are the difference between metadata you can query and metadata you can only look at.
+### 6.4 Extractors: clauses, tables, images and drawn figures
 
-`file_hash` makes re-ingestion idempotent: an unchanged file is skipped unless `--force` is passed.
-`embed_model` is stamped on every node so that `check_embed_model_compatibility` can refuse to run
-against a table containing vectors from a different embedding model — see section 9.6.
-
-### 6.3 Clause-aware sectioning
-
-`src/ingestion/splitters.py::split_by_clause` splits the markdown on numbered headings before any
-semantic chunking happens. `## 4.1 Transaction records`, `### A.8.15 Logging` and `## §17.1 Right
-to erasure` all yield a `(section, clause_number, body)` triple.
+**Clauses** (`extractors/clause_extraction.py`). The markdown is split on numbered headings before
+any chunking happens. `## 4.1 Transaction records`, `### A.8.15 Logging` and `## §17.1 Right to
+erasure` each become a `ClauseSection`.
 
 The clause boundary is the unit of citation, so it has to be the outermost split. If semantic
 chunking ran first it would happily merge the end of clause 4.1 with the start of 4.2 wherever the
-prose flows, and the resulting chunk could not be cited as either one.
+prose flows, and the resulting chunk could not honestly be cited as either one.
 
-### 6.4 Two splitters, in a deliberate order
+**Tables** (`extractors/table_extraction.py`). Tables are found *inside* clause sections rather
+than across the whole document, and that is the point: a table extracted from the body of clause
+4.1 inherits clause 4.1's number and heading, so its node can be cited as `§4.1` like any other
+node. Extracting tables from the flat document — which is what the previous version did — produced
+table nodes with no clause number at all, retrievable but not citable.
 
-Inside a clause, `SemanticSplitterNodeParser` (buffer 1, 95th-percentile breakpoint) splits on
-embedding distance between adjacent sentences — it breaks where the meaning turns, not where a
-character counter runs out. That is what keeps a definition and the obligation that depends on it
-in the same chunk.
+Three things happen to each table found:
+
+- A block that matches the table shape but has no populated data row is dropped. A parser that
+  meets a boxed diagram often emits its borders as an empty header row; indexing that produces a
+  node whose text is "Table with 0 data rows" and whose only effect is to displace a real result.
+- Ragged rows are padded to the header width, so a row that lost a cell to a merged column does not
+  shift every value under the wrong heading.
+- The table is removed from the clause text and replaced by a one-line placeholder.
+
+That last one is the substantive change. The table becomes its own node, so leaving the raw pipe
+characters in the text chunk means the same content is embedded twice — once as a summary that
+retrieves well and once as a wall of pipes that retrieves badly and drags down the vector of the
+prose it sits in. The placeholder keeps the fact that the clause contains a table visible to the
+answering model without paying for it in the embedding.
+
+**Images** (`extractors/image_extraction.py`). A PDF can carry a picture in two completely different
+ways, and only one of them is an image in the sense `page.get_images()` means.
+
+An **embedded raster** is a PNG or JPEG stored inside the file. PyMuPDF pulls those out with their
+page and index. Anything under 4KB is dropped as a logo or a horizontal rule, and bytes that have
+been seen before in the same document are dropped as well — a letterhead repeated on twenty pages
+is one image, and without that check it would cost twenty vision calls and put twenty identical
+captions into the index.
+
+A **drawn figure** is not stored as a picture at all. It is a sequence of drawing operators — fill
+this rounded rectangle, stroke this line, fill this arrowhead — that the viewer executes to paint
+the page. Every flowchart in this corpus is of that kind: the seven policy PDFs contain **zero**
+embedded rasters between them, while the access-provisioning lifecycle, the incident-response
+workflow and the conflict-disclosure flow are each fifteen to twenty-five drawing operators. Asking
+`page.get_images()` for them returns nothing, forever. That is not a bug in the extractor; it is a
+category error, and it is the reason a corpus can look image-free while a reader can plainly see
+diagrams on the page.
+
+`extractors/figure_detection.py` finds them geometrically, with no model call:
+
+1. Take every drawing on the page. Discard anything covering more than 60% of it — that is a
+   background wash, not a figure.
+2. Discard any drawing that sits inside a detected table. Table borders are drawings too, and
+   without this step every bordered table would register as a diagram.
+3. Merge what is left into clusters, joining any two whose bounding boxes come within 44 points.
+   That distance is not arbitrary: it is wide enough to pull the far side of a decision branch into
+   the same figure, and narrow enough not to swallow the next section.
+4. Keep a cluster only if it has at least five drawings, of which at least three are **solid**
+   shapes rather than lines. This is what separates a diagram from a bordered disclaimer box: the
+   disclaimer is one filled rectangle plus four border lines — five drawings, but one solid shape.
+5. Grow the box to absorb any short text block it touches, so branch labels like *Low Severity* and
+   *No Violation* are inside the crop rather than sheared off at its edge.
+6. Render the region at 2× and hand the PNG to the captioner like any other image.
+
+Across the seven policy documents that yields seven figures, and no false positives from the table
+borders, section rules and disclaimer boxes that share the same drawing operators. `scripts/diagnose_ingestion.py`
+prints the embedded, drawing and detected-figure counts per file, which is
+the fastest way to see why a document produced the image nodes it did.
+
+Both kinds become `image_caption` nodes and both carry `image_kind` (`raster` or `figure`) in
+metadata, because "the vision model saw a stored picture" and "the vision model saw a picture we
+rendered from drawing instructions" are different provenance and a caption that looks wrong should
+be traceable to which one it was.
+
+### 6.5 Processors: an element becomes a node
+
+**`processors/textprocessing.py`** splits a clause into chunks. Inside a clause,
+`SemanticSplitterNodeParser` (buffer 1, 95th-percentile breakpoint) splits on embedding distance
+between adjacent sentences — it breaks where the meaning turns, not where a character counter runs
+out. That is what keeps a definition and the obligation that depends on it in the same chunk.
 
 But semantic splitting has no size ceiling. A clause written as one long unbroken argument comes
 back as one enormous node that blows the embedding input limit and swamps the context window. So
-every node over `MAX_CHUNK_CHARS` goes through LangChain's `RecursiveCharacterTextSplitter`, with
-separators ordered `\n## `, `\n### `, `\n\n`, `\n`, `. `, ` `, `""`. Recursive splitting tries the
-most meaningful separator first and only falls back to a cruder one when the piece is still too
-big, so the bounded fallback still breaks at the most sensible place available.
+every piece over `MAX_CHUNK_CHARS` goes through LangChain's `RecursiveCharacterTextSplitter`, with
+separators ordered `\n## `, `\n### `, `\n\n`, `\n`, `. `, ` `, `""`. Recursive splitting tries
+the most meaningful separator first and only falls back to a cruder one when the piece is still too
+big, so the bounded fallback still breaks at the most sensible place available. The same splitter
+takes over when semantic splitting fails outright — a missing embedding deployment, a rate limit —
+so ingestion degrades to deterministic chunking instead of stopping.
 
-The same splitter is the fallback when semantic splitting fails outright — a missing embedding
-deployment, a rate limit. Ingestion degrades to deterministic chunking instead of stopping.
+**`processors/tableprocessing.py`** gives each table a small-model summary. The summary becomes the
+node text and the full markdown table is kept in `original_table` metadata: the summary is what
+gets embedded, because a wall of pipe characters embeds badly and retrieves worse, and the original
+table is what gets handed to the answering model, so no figure is lost to summarisation. The prompt
+says to keep every number, date and threshold exactly as printed and not to interpret consequences.
+If the model call fails the node is still built, from a structural fallback summary — losing the
+table entirely because a summariser timed out would be the worse outcome.
 
-`STRUCTURAL_KEYS` are excluded from both the embedded text and the LLM-visible text. A file size
-and an upload timestamp are useful for filtering and useless for meaning; embedding them adds noise
+**`processors/imageprocessing.py`** and **`processors/image_captioning.py`** are deliberately two
+files. The captioner is one function that takes a path and returns a caption from the vision
+deployment; the processor stores the image under `IMAGES_STORAGE_DIR`, asks for the caption and
+builds the node. Splitting them means the vision call can be exercised on a single image without
+the rest of the pipeline, which is how you tell a bad caption apart from a bad node.
+
+The caption prompt asks for the steps and decision points of a flowchart in order. A compliance
+escalation flowchart is a rule expressed as a picture, and it should be retrievable by the same
+query that would find that rule in prose.
+
+**Media nodes are tied to the route.** Table and image processing runs only when the router chose
+LlamaParse, and image extraction runs only when the probe actually saw an image or a drawn figure. A document that
+went through the plain reader gets text nodes and a logged sentence saying why it got nothing else.
+This follows from what the route means: the layout parser is chosen *because* the probe found
+tables or images, so looking for them on the other branch is looking for something the branch was
+chosen for lacking.
+
+### 6.6 The metadata contract
+
+`src/ingestion/metadata/` is the reason the package is shaped this way. Metadata here is not
+decoration on a chunk — it is the RBAC boundary (`doc_type`), the version filter (`is_current`,
+`effective_date`), the citation (`clause_number`, `document_title`) and the media carry-through
+(`content_type`, `modality`). A missing key does not raise; it silently changes which rows a filter
+matches, which is the hardest class of bug this system can have.
+
+Four files, four responsibilities:
+
+**`schema.py`** is the contract itself, and it imports nothing. The closed enums, the required key
+sets for a document and for a node, the mapping from `content_type` to `modality`, the keys
+excluded from embedding, and the validators. Because it has no dependencies it can be imported by a
+test, a script or a migration without pulling in Azure or a database connection.
+
+**`structural.py`** derives what the file itself knows: frontmatter, title, version,
+`effective_date`, size, `file_hash`, and `doc_type` from the filename. All of it is deterministic
+and none of it costs a model call.
+
+**`content.py`** infers what only a reader can know — `topic`, `keywords`, `owning_department`,
+`content_domain`, `intended_route`, `summary` — from one small-model call over the first 3000
+characters. Every inferred field is a closed enum validated against the allow-list after the model
+returns. An open-vocabulary metadata field cannot be filtered on reliably, because the model will
+invent a new spelling for the same concept on the next document and the filter silently stops
+matching. Closed enums are the difference between metadata you can query and metadata you can only
+look at. If the call fails, documented defaults are used and ingestion continues.
+
+**`stamping.py`** is the only place in the codebase that builds node metadata. One function per
+node kind — text, table, image — each producing the full document block plus the element's own
+keys, its `citation`, and its `element_label`. Centralising this fixed a real defect: table and
+image nodes used to skip the metadata exclusion lists that text nodes set, so `original_table` was
+being embedded into the very vector the summary existed to keep clean.
+
+The precedence order for anything more than one source can supply is fixed: **frontmatter beats the
+filename, the filename beats the model.** A human who wrote `doc_type: gdpr` in the document has
+stated a fact; a filename is a strong hint; a model reading an excerpt is a guess.
+
+`doc_type` is the exception that refuses to guess at all. If frontmatter, filename and model all
+fail to produce a valid one, ingestion of that file stops with a message naming the two ways to fix
+it. `doc_type` is the key every role's scope filter matches on, so a wrong default either hides the
+document from everyone or shows it to a role that should not see it. There is no safe guess.
+
+Finally, `pipeline.py` runs `assert_nodes_carry_contract` over every node before a single one is
+inserted. It checks the required keys are present, that every closed enum holds a permitted value,
+and that `content_type` and `modality` agree. In normal operation it never fires, because stamping
+is centralised — it exists so that the day someone adds a fourth node kind and forgets a key, the
+failure is a loud exception during ingestion rather than a chunk that quietly never retrieves.
+
+The full contract, as it lands on every node:
+
+| Group | Keys |
+|---|---|
+| Identity | `domain`, `doc_type`, `document_title`, `version`, `effective_date`, `is_current` |
+| Inferred | `topic`, `keywords`, `summary`, `owning_department`, `content_domain`, `intended_route` |
+| Provenance | `original_file_name`, `file_name`, `file_type`, `file_size_kb`, `file_hash`, `ingested_at`, `parsed_with`, `parse_reason`, `embed_model` |
+| Node | `level`, `content_type`, `modality`, `section`, `clause_number`, `citation`, `element_label` |
+| Text only | `chunk_index` |
+| Table only | `table_index`, `original_table` |
+| Image only | `page`, `page_label`, `image_index`, `image_path` |
+
+`file_hash` makes re-ingestion idempotent: an unchanged file is skipped unless `--force` is passed.
+`embed_model` is stamped on every node so `check_embed_model_compatibility` can refuse to run
+against a table holding vectors from a different embedding model — see section 9.7. The provenance
+group is excluded from both the embedded text and the LLM-visible text: a file size and an upload
+timestamp are useful for filtering and useless for meaning, and embedding them adds the same noise
 to every vector in the corpus.
 
-### 6.5 Tables and images become their own nodes
-
-**Tables** (`table_nodes.py`): each markdown table found in the parsed output gets a small-model
-summary, and the summary becomes the node text while the full markdown table is kept in
-`original_table` metadata. The summary is what gets embedded, because a wall of pipe characters
-embeds badly and retrieves worse; the original table is what gets handed to the answering model, so
-no figure is lost to summarisation. The summary prompt says to keep every number, date and
-threshold exactly as printed, and not to interpret consequences.
-
-**Images** (`image_nodes.py`): PyMuPDF extracts embedded images, anything under 4KB is dropped as a
-logo or rule, and a vision model captions the rest. The caption becomes the node text and the image
-is copied to `IMAGES_STORAGE_DIR` with its path in metadata, so a UI can render the diagram beside
-the answer that cites it. The caption prompt asks for the steps and decision points of a flowchart
-in order — a compliance escalation flowchart is a rule expressed as a picture, and it should be
-retrievable by the same query that would find the rule in prose.
-
-Every node carries `content_type` (`text` / `table_summary` / `image_caption`) and `modality`
-(`text` / `table` / `diagram`), which is what lets `KeepTopN` carry media past the rerank cut
-(section 7.4).
-
-### 6.6 Supersession
+### 6.7 Supersession
 
 After insert, `supersede_previous_versions` flips `is_current` to false on every node of the same
 `doc_type` carrying a different `version`. Retrieval then filters superseded nodes out. This is how
@@ -525,7 +726,7 @@ That failure mode is the reason the handler now logs at `error` and states the c
 than logging a bare warning. A supersession that fails quietly is indistinguishable from one that
 had nothing to supersede.
 
-### 6.7 Two ways into the pipeline: startup bootstrap and the upload endpoint
+### 6.8 Two ways into the pipeline: startup bootstrap and the upload endpoint
 
 Everything above describes what happens to one document. This section is about who starts it.
 
@@ -597,12 +798,12 @@ much worse error message.
 The uploaded bytes are written to a `tempfile.mkstemp` file and passed to `ingest_file` as a path.
 Four reasons, and they compound:
 
-*The pipeline needs a real path.* `parse_document` hands the file to pdfplumber, LlamaParse or
+*The pipeline needs a real path.* `load_document` hands the file to pdfplumber, LlamaParse or
 `SimpleDirectoryReader`, and every one of those opens a path on disk. There is no in-memory route
 through the parser, so the bytes have to land somewhere.
 
-*The suffix carries routing information.* `requires_multimodal_parsing` branches on the file
-extension, and `parse_plain_text` branches on it again. A temp file without the right suffix would
+*The suffix carries routing information.* `choose_route` branches on the file extension, and the
+LlamaIndex loader branches on it again. A temp file without the right suffix would
 have a PDF fall through to the plain-text reader and produce garbage rather than an error. That is
 why the suffix is taken from the original filename and passed to `mkstemp` explicitly.
 
@@ -1044,10 +1245,11 @@ about a moment. Pinning the date makes the answer reproducible, which is what ma
 
 There are 18 prompts in this system. Fifteen sit in `src/prompts/library.py`; the rest live beside
 the code that owns them — the SQL intent classifier in `src/guardrails/sql_guard.py`, the table
-summariser in `src/ingestion/table_nodes.py`, the image captioner in `src/ingestion/image_nodes.py`,
-the metadata tagger in `src/ingestion/policy_metadata.py`, the agent system prompt in
-`src/nodes/agentic_rag.py`, the NL2SQL schema notes in `src/sqlpath/templates.py`, and the parsing
-instruction handed to LlamaParse in `src/ingestion/parser.py`.
+summariser in `src/ingestion/processors/tableprocessing.py`, the image captioner in
+`src/ingestion/processors/image_captioning.py`, the metadata tagger in
+`src/ingestion/metadata/content.py`, the agent system prompt in `src/nodes/agentic_rag.py`, the
+NL2SQL schema notes in `src/sqlpath/templates.py`, and the parsing instruction handed to
+LlamaParse in `src/ingestion/loaders/llamaparse_loader.py`.
 
 They are not written to a single house style. Each one is shaped by what happens when it fails, and
 that is the thread running through everything below.
@@ -1435,11 +1637,11 @@ base rate of the behaviour you want, and deterministic code decides what is allo
 | `REFLECTION` | `prompts/library.py` | small | No-repeat constraint, unrepairable escape hatch |
 | `INTENT_PROMPT` | `guardrails/sql_guard.py` | small | Single-token output, rubric, fail-closed |
 | `SCHEMA_NOTES` | `sqlpath/templates.py` | — | Domain priming against semantic traps |
-| `TABLE_SUMMARY_PROMPT` | `ingestion/table_nodes.py` | small | Preserve-verbatim, no interpretation |
-| `CAPTION_PROMPT` | `ingestion/image_nodes.py` | vision | Preserve-verbatim, no speculation |
-| `CONTENT_PROMPT` | `ingestion/policy_metadata.py` | small | Closed enums, JSON-only, validated after return |
+| `SUMMARY_PROMPT` | `ingestion/processors/tableprocessing.py` | small | Preserve-verbatim, no interpretation |
+| `CAPTION_PROMPT` | `ingestion/processors/image_captioning.py` | vision | Preserve-verbatim, no speculation |
+| `CONTENT_PROMPT` | `ingestion/metadata/content.py` | small | Closed enums, JSON-only, validated after return |
 | `AGENT_SYSTEM_PROMPT` | `nodes/agentic_rag.py` | strong | Retrieve-before-answer, stated budget, licensed abstention |
-| `LLAMAPARSE_INSTRUCTION` | `ingestion/parser.py` | — | Preserve clause numbering, no restructuring |
+| `PARSING_INSTRUCTION` | `ingestion/loaders/llamaparse_loader.py` | — | Preserve clause numbering, no restructuring |
 
 ---
 
@@ -1613,8 +1815,47 @@ curl -X POST localhost:8000/ingest \
 }
 ```
 
-A duplicate returns 200 with `"status": "skipped"` and a reason rather than an error. 6.7 covers
-the temp-file handling and the rest of the status mapping.
+A duplicate returns 200 with `"status": "skipped"` and a reason rather than an error. Section 6.8
+covers the temp-file handling and the rest of the status mapping.
+
+**401 and 403 mean different things here, and the difference is the whole diagnosis.**
+
+| Code | Meaning | Usual cause |
+|---|---|---|
+| 401 | the request carried no readable token | the `Authorization` header was never sent; in the Swagger page, `POST /auth/token` returns a token but does not attach it — you have to click **Authorize** and paste the `access_token` value |
+| 401 | the token could not be verified | something was picked up while copying. `Invalid header padding` = the word `Bearer` sits in front of it and Swagger adds its own; `Invalid crypto padding` = a quotation mark or space is stuck to the end; `Invalid payload padding` = it was copied across a line break; `Not enough segments` = only part was copied; `Signature verification failed` = characters were altered, or `JWT_SECRET` changed after minting. The response body names which one |
+| 401 | the token expired | tokens last `JWT_EXPIRY_MINUTES`, 60 by default |
+| 403 | the token is valid, the role is not | `/ingest` and `/ingest/status` need `admin`; `/review/*` needs `compliance_officer`, `legal_reviewer` or `admin` |
+
+A role that is merely insufficient can never produce a 401, so a 401 on `/ingest` is always about
+the header and never about permissions. `src/auth/security.py` says which of the four it was in the
+response body, and every 401 carries `WWW-Authenticate: Bearer` so a client knows a token is what
+is missing.
+
+The end-to-end shape, with the role that matters:
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "mohit", "role": "admin", "departments": ["legal"]}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+curl -X POST "localhost:8000/ingest?force=true" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@data/policies/Information_Security_Access_Control_Policy.pdf"
+```
+
+`scripts/try_ingest.py` does the same thing in one command — mint an admin token, upload one
+document, print the node counts, then print the whole indexed corpus:
+
+```bash
+uv run python scripts/try_ingest.py
+uv run python scripts/try_ingest.py --file data/policies/Anti_Bribery_Ethical_Conduct_Policy.pdf
+uv run python scripts/try_ingest.py --status-only
+uv run python scripts/try_ingest.py --role store_associate
+```
+
+The last one is worth running once: it shows the 403 rather than the 401, which is how you tell a
+role problem from a header problem without reading the access log.
 
 Five roles, each mapping to a fixed set of document and table scopes in `src/auth/rbac.py`:
 
@@ -1665,16 +1906,16 @@ a whole. "Where" gives the module that owns the usage.
 | `llama-index-llms-azure-openai` | >=0.3.0 | `AzureOpenAI` | `src/index/models.py` | The LlamaIndex-side client, so one Azure configuration serves both frameworks. |
 | `llama-index-embeddings-azure-openai` | >=0.3.0 | `AzureOpenAIEmbedding` | `src/index/models.py` | Used by both the semantic splitter and the retriever, which is what keeps ingestion-time and query-time vectors in the same space. |
 | `llama-index-tools-mcp` | >=0.2.0 | `BasicMCPClient`, `McpToolSpec.to_tool_list_async()` | `src/tools/mcp_tools.py` | Turns an MCP server into LlamaIndex tools the ReAct agent can call with no bespoke client code. The allow-list is passed at spec level so an unexpected new tool on the server cannot silently enter the agent's toolbox. |
-| `llama-parse` | >=0.5.0 | `LlamaParse(result_type="markdown", parsing_instruction=…)` | `src/ingestion/parser.py` | Layout-aware parsing that keeps tables as markdown and clause numbering intact. `parsing_instruction` is what protects the clause identifiers the citation contract depends on. |
+| `llama-parse` | >=0.5.0 | `LlamaParse(result_type="markdown", parsing_instruction=…)` | `src/ingestion/loaders/llamaparse_loader.py` | Layout-aware parsing that keeps tables as markdown and clause numbering intact. `parsing_instruction` is what protects the clause identifiers the citation contract depends on. |
 
 ### 13.3 Chunking and multimodal input
 
 | Library | Version | Imported | Where | Why this library |
 |---|---|---|---|---|
-| `langchain-text-splitters` | >=0.3.0 | `RecursiveCharacterTextSplitter` | `src/ingestion/splitters.py` | The bounded fallback under semantic splitting. Recursive separator descent breaks at the most meaningful boundary that still fits, which is what you want when a clause is too long to chunk semantically or when the embedding call fails. |
-| `pdfplumber` | >=0.11.0 | `open()`, `page.extract_tables()`, `page.images` | `src/ingestion/parser.py` | The cheap local sniff that decides whether a document is worth a paid LlamaParse call. |
-| `pymupdf` | >=1.24.0 | `fitz.open()`, `page.get_images()`, `Pixmap` | `src/ingestion/image_nodes.py` | Extracts embedded images with their page and index so a caption node can point back at where the diagram appeared. |
-| `python-docx` | >=1.1.2 | `Document(...).tables`, `.inline_shapes` | `src/ingestion/parser.py` | The same multimodal sniff for DOCX. |
+| `langchain-text-splitters` | >=0.3.0 | `RecursiveCharacterTextSplitter` | `src/ingestion/processors/splitters.py` | The bounded fallback under semantic splitting. Recursive separator descent breaks at the most meaningful boundary that still fits, which is what you want when a clause is too long to chunk semantically or when the embedding call fails. |
+| `pdfplumber` | >=0.11.0 | `open()`, `page.extract_tables()`, `page.images` | `src/ingestion/router.py` | The cheap local sniff that decides whether a document is worth a paid LlamaParse call. |
+| `pymupdf` | >=1.24.0 | `pymupdf.open()`, `page.get_images()`, `page.get_drawings()`, `page.find_tables()`, `page.get_pixmap(clip=…)`, `Pixmap`, `Matrix` | `src/ingestion/extractors/image_extraction.py`, `src/ingestion/extractors/figure_detection.py`, `src/ingestion/extractors/pdf_backend.py` | Two jobs. It extracts embedded raster images with their page and index, and it exposes the drawing operators that let `figure_detection` find flowcharts that were drawn rather than embedded — which in this corpus is all of them — and render the region to a PNG the vision model can read. |
+| `python-docx` | >=1.1.2 | `Document(...).tables`, `.inline_shapes` | `src/ingestion/router.py` | The same multimodal sniff for DOCX. |
 | `flashrank` | >=0.2.9 | `Ranker`, `RerankRequest` | `src/retrieval/postprocessors.py` | A local cross-encoder that scores query and passage jointly — a better signal than comparing two independent vectors, with no API call and no ability to hallucinate a document into the list. |
 
 ### 13.4 Web and API layer
