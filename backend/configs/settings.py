@@ -1,0 +1,114 @@
+from datetime import date
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    app_env: str = "local"
+    log_level: str = "INFO"
+
+    azure_openai_endpoint: str = ""
+    azure_openai_api_key: str = ""
+    azure_openai_api_version: str = "2024-10-21"
+    azure_openai_small_deployment: str = "gpt-4o-mini"
+    azure_openai_strong_deployment: str = "gpt-4o"
+    azure_openai_embedding_deployment: str = "text-embedding-3-small"
+    azure_openai_vision_deployment: str = "gpt-4o"
+    embedding_dimensions: int = 1536
+
+    llamaparse_api_key: str = ""
+    vector_table_name: str = "policy_kb"
+    images_storage_dir: str = "data/stored_images"
+
+    policy_corpus_dir: str = "data/policies"
+    bootstrap_corpus_on_startup: bool = True
+    bootstrap_fail_fast: bool = False
+    upload_max_bytes: int = 20 * 1024 * 1024
+
+    max_chunk_tokens: int = 512
+    max_chunk_chars: int = 2200
+    chunk_overlap: int = 40
+    chunk_overlap_chars: int = 200
+    max_table_chars: int = 5000
+    semantic_buffer_size: int = 1
+    semantic_breakpoint_percentile: int = 95
+
+    use_auto_retriever: bool = False
+    fusion_num_queries: int = 1
+    enable_flashrank_rerank: bool = True
+    flashrank_model: str = "ms-marco-MiniLM-L-12-v2"
+    flashrank_cache_dir: str = ""
+    enable_citation_synthesis: bool = False
+
+    enable_agentic_path: bool = True
+    agent_max_iterations: int = 8
+    agentic_min_seconds: float = 3.0
+
+    mcp_enabled: bool = True
+    mcp_required: bool = False
+    mcp_server_url: str = ""
+    mcp_allowed_tools: str = ""
+    mcp_timeout_seconds: int = 30
+    mcp_max_output_chars: int = 6000
+
+    enable_guardrails_ai: bool = True
+    pii_entities: str = ""
+
+    escalation_email_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    application_email: str = ""
+    reviewer_email: str = ""
+    reviewer_console_url: str = "http://localhost:8000/review"
+
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/retail_compliance_db"
+    db_pool_min_size: int = 2
+    db_pool_max_size: int = 10
+    db_connect_timeout_seconds: float = 3.0
+    sql_statement_timeout_ms: int = 3000
+    sql_row_limit: int = 200
+
+    jwt_secret: str = "change-this-to-a-long-random-string"
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_minutes: int = 60
+
+    confidence_threshold: float = 0.75
+    max_reflection_retries: int = 2
+    panel_repair_passes: int = 1
+    default_token_budget: int = 12000
+    deadline_seconds_standard: float = 4.0
+    deadline_seconds_hybrid: float = 6.0
+    deadline_seconds_agentic: float = 10.0
+    deadline_seconds_high_risk: float = 12.0
+
+    retrieval_top_k: int = 20
+    rerank_top_n: int = 6
+    rrf_k: int = 60
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    as_of_date: date = date(2025, 12, 31)
+
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    tracing_enabled: bool = False
+
+    rate_limit_standard: str = "30/minute"
+    rate_limit_high_risk: str = "10/minute"
+
+    @property
+    def azure_configured(self) -> bool:
+        return bool(self.azure_openai_endpoint and self.azure_openai_api_key)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

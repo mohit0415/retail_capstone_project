@@ -247,14 +247,21 @@ TRUNCATE compliance_reviews, retention_records, audit_logs, vendors RESTART IDEN
 
 then run it once.
 
-### Step 4 — add the policy corpus and index it
+### Step 4 — add the policy corpus
 
-This is the step the generator does not cover, and without it the RAG, hybrid, agentic and
-high-risk paths all return no policy evidence.
+Without the corpus the RAG, hybrid, agentic and high-risk paths all return no policy evidence.
 
 Put the seven documents in `data/policies/` as markdown, PDF or DOCX.
 `data/policies/README.md` gives the required filenames and the exact `doc_type` strings the RBAC
 layer grants against — a typo there silently hides a document from every role.
+
+**You do not have to index them by hand.** The first time the API starts against an empty vector
+table it ingests that folder itself, before it accepts a single request. Section 6.7 explains how
+that works and why it blocks rather than running in the background. So for a normal first run,
+putting the files in the folder *is* step 4, and step 6 does the rest.
+
+Indexing ahead of time is still supported, and is the better choice when you want the node counts
+in front of you or you are re-indexing after a parser change:
 
 ```bash
 uv run python scripts/ingest_policies.py
@@ -278,7 +285,11 @@ uv run python scripts/ingest_policies.py --force                    # re-ingest 
 ```
 
 Ingestion **is** idempotent — files are hashed and unchanged ones are skipped — so unlike the
-generator it is safe to re-run.
+generator it is safe to re-run. The script and the startup bootstrap read the same
+`POLICY_CORPUS_DIR` setting, so they can never disagree about where the corpus lives.
+
+A document that arrives after the system is already running does not need either of these. Upload
+it to `POST /ingest` instead; that path is described in 6.7 as well.
 
 ### Step 5 — optional, Guardrails AI validators
 
@@ -296,8 +307,26 @@ Skip it and the system logs the hint once and falls back to the Presidio and reg
 uv run python main.py
 ```
 
+**The first run is slow, and that is the corpus being indexed.** If the vector table is empty,
+startup parses and embeds everything in `data/policies/` before the server accepts a request —
+several minutes with LlamaParse on seven PDFs. The log says what it is doing:
+
+```
+INFO  vector table is empty, ingesting the policy corpus from .../data/policies
+INFO  corpus bootstrap complete: 312 node(s) from 7 file(s), 0 skipped
+```
+
+Every later start finds rows in the table, logs `policy corpus already indexed, skipping bootstrap`
+and comes up in seconds. If you already ran step 4 by hand, the first start is fast too — the check
+is on the index, not on whether the bootstrap has run before.
+
 *Check:* `curl -s localhost:8000/health | jq` reports `"database": "up"` and a non-null
-`escalation_queue_depth`.
+`escalation_queue_depth`. For the corpus specifically, `GET /ingest/status` with an admin token
+returns the per-document node counts.
+
+Set `BOOTSTRAP_CORPUS_ON_STARTUP=false` to skip it entirely, or `BOOTSTRAP_FAIL_FAST=true` to make
+a failed bootstrap stop the process instead of starting with an empty knowledge base. Section 6.7
+explains why each default is what it is.
 
 ### Step 7 — try both halves
 
@@ -327,7 +356,10 @@ system behaving correctly on an empty knowledge base rather than a bug.
 |---|---|---|
 | Step 2 | API starts, auth, health | Everything needing data |
 | Step 3 | NL2SQL path, entity resolution, L3 risk probes | Policy lookup, hybrid, agentic, panel — no clauses to cite |
-| Step 4 | All five paths, citations, conflict detection | — |
+| Step 4, or the first start after it | All five paths, citations, conflict detection | — |
+
+Step 4 is the row that moves, because the corpus can be indexed by the script *or* by the first
+API start. Either way the same pipeline runs and the same nodes land in `data_policy_kb`.
 
 ### Tests and evaluation
 
@@ -352,7 +384,8 @@ scripts/            init_db.py, ingest_policies.py
 evals/              golden_set.json and the SLO-checking runner
 src/
   index/            LlamaIndex Settings, Azure model tiers, PGVectorStore index
-  ingestion/        LlamaParse routing, splitters, table and image nodes, metadata, pipeline
+  ingestion/        LlamaParse routing, splitters, table and image nodes, metadata, pipeline,
+                    bootstrap (the startup corpus load)
   retrieval/        fusion retriever, postprocessors, adapter back to the domain model
   tools/            policy tool, NL2SQL tool, MCP tools, role-scoped registry
   sqlpath/          the guarded NL2SQL engine and the schema notes that prime it
@@ -377,7 +410,8 @@ sixty files.
 
 ## 6. The ingestion pipeline
 
-`scripts/ingest_policies.py` → `src/ingestion/pipeline.py`. Six stages.
+`scripts/ingest_policies.py` → `src/ingestion/pipeline.py`. Six stages, plus 6.7 on the two ways
+the pipeline gets started.
 
 ### 6.1 Routing: does this document need LlamaParse?
 
@@ -473,6 +507,132 @@ After insert, `supersede_previous_versions` flips `is_current` to false on every
 `doc_type` carrying a different `version`. Retrieval then filters superseded nodes out. This is how
 a withdrawn clause stops appearing in answers without anyone deleting anything — the old version
 stays in the table for audit, and stops being retrievable.
+
+The update casts on both sides:
+
+```sql
+SET metadata_ = jsonb_set(metadata_::jsonb, '{is_current}', 'false')::json
+```
+
+The casts are not decoration. `PGVectorStore.from_params` defaults `use_jsonb=False`, so
+`data_policy_kb.metadata_` is `json`, and `jsonb_set` has no `json` overload — the uncast version
+failed on every call with `function jsonb_set(json, unknown, unknown) does not exist`, was swallowed
+by the surrounding `except`, and left every superseded version marked current and still retrievable.
+A withdrawn clause kept being cited. The cast form is verified to work against both a `json` and a
+`jsonb` column, so it survives a later switch to `use_jsonb=True`.
+
+That failure mode is the reason the handler now logs at `error` and states the consequence rather
+than logging a bare warning. A supersession that fails quietly is indistinguishable from one that
+had nothing to supersede.
+
+### 6.7 Two ways into the pipeline: startup bootstrap and the upload endpoint
+
+Everything above describes what happens to one document. This section is about who starts it.
+
+There are two entry points, and they exist because the corpus arrives at two different times. The
+seven founding documents are known before the system runs. Anything after that — a reissued vendor
+policy, a new regulation — arrives while it is already serving traffic. A design that only handles
+the first case forces a redeploy for every new document; one that only handles the second leaves
+the first run answering policy questions with an empty index.
+
+**Startup bootstrap — `src/ingestion/bootstrap.py`.**
+
+`bootstrap_corpus()` runs from the FastAPI lifespan in `main.py` and follows one rule: *ingest only
+when there is nothing indexed.* It calls `table_has_rows()` against the vector table, and if that
+returns true it logs and returns immediately. So the first boot does the work and every boot after
+it costs one cheap `SELECT 1 ... LIMIT 1`.
+
+Emptiness is the trigger rather than a marker file or an environment flag because it is the
+condition that actually matters. A flag can be stale, a marker file can survive a wiped database;
+"the vector table has no rows" is the thing that makes policy questions unanswerable, and it is
+true or false right now.
+
+Before ingesting, the bootstrap runs `check_embed_model_compatibility()` — the same guard described
+in 9.7. On a genuinely empty table this passes trivially, but the table can be non-empty and
+*wrong*: a database restored from a snapshot embedded with a different model. Checking first means
+that case aborts with a clear message instead of quietly appending incompatible vectors.
+
+It **blocks startup** rather than running in a background thread. Blocking means uvicorn is slow to
+come up the first time, which is the honest cost of parsing seven PDFs through LlamaParse and
+embedding them. A background thread would have the app accept requests seconds after launch, and
+every request arriving before the thread finished would get a confident answer built on whatever
+subset of the corpus happened to be indexed at that moment. That is worse than a slow boot: the
+system would be wrong in a way no caller could detect. A compliance answer drawn from a partial
+corpus looks exactly like one drawn from a complete corpus.
+
+The lifespan is `async`, and ingestion is a long stretch of blocking network and CPU work, so it
+goes through `asyncio.to_thread`. Calling it directly would block the event loop rather than the
+startup sequence — the same wall-clock wait, but with the loop frozen, so the health endpoint and
+the ASGI server's own signal handling stop responding too.
+
+Failure is logged and startup continues, unless `BOOTSTRAP_FAIL_FAST=true`. The default favours a
+running service: with an empty index the SQL path, `/health` and the review console all still work,
+and the log names exactly what went wrong. Set the flag in production, where a container that
+refuses to become healthy is more useful than one silently serving without a knowledge base. That
+choice is deliberately configuration rather than code, because the right answer differs between a
+laptop and a deployment.
+
+Two settings control it: `POLICY_CORPUS_DIR` (default `data/policies`, resolved relative to the
+backend package so it does not depend on the working directory uvicorn was launched from) and
+`BOOTSTRAP_CORPUS_ON_STARTUP` (default true — turn it off in tests and in any process that must not
+touch the corpus).
+
+**Upload endpoint — `POST /ingest`.**
+
+Admin only, via `require_corpus_admin`. Uploading a document changes what every other role can
+retrieve, which makes it the widest-blast-radius operation in the API — wider than answering a
+question, and wider than reviewing an escalation. A `store_associate` who could add a document
+could plant text that a `legal_reviewer` later cites. The grant lives in `rbac.py` as
+`CORPUS_ADMIN_ROLES` next to the other scope tables, not as a check inside the route, so the
+authority model stays readable in one file.
+
+The endpoint validates before it does any work: a filename must be present, the suffix must be one
+the pipeline can actually parse (`.md`, `.pdf`, `.docx`, `.txt`), the body must be non-empty and
+under `UPLOAD_MAX_BYTES`, and the embedding model must match what is already indexed. Each of these
+is cheap and each rules out a failure that would otherwise surface deep inside LlamaParse with a
+much worse error message.
+
+**Why the upload goes to a temporary file.**
+
+The uploaded bytes are written to a `tempfile.mkstemp` file and passed to `ingest_file` as a path.
+Four reasons, and they compound:
+
+*The pipeline needs a real path.* `parse_document` hands the file to pdfplumber, LlamaParse or
+`SimpleDirectoryReader`, and every one of those opens a path on disk. There is no in-memory route
+through the parser, so the bytes have to land somewhere.
+
+*The suffix carries routing information.* `requires_multimodal_parsing` branches on the file
+extension, and `parse_plain_text` branches on it again. A temp file without the right suffix would
+have a PDF fall through to the plain-text reader and produce garbage rather than an error. That is
+why the suffix is taken from the original filename and passed to `mkstemp` explicitly.
+
+*The upload must not become part of the corpus folder.* Writing it into `data/policies/` would make
+one API call permanently change what the next startup bootstrap ingests, and an upload that failed
+validation halfway through would leave a broken file there for the next boot to trip over. The
+temp file keeps the request self-contained: the corpus folder is the seed set, the endpoint is a
+runtime addition, and neither writes into the other.
+
+*Cleanup has to survive failure.* The `unlink` sits in a `finally`, so a LlamaParse timeout, a
+rejected document or an embedding error all leave nothing behind. Without it a service that fails
+to parse a few large PDFs slowly fills its own disk, and that shows up as an unrelated outage days
+later.
+
+`original_filename` is passed alongside the temp path for exactly this reason — the metadata
+builder and the audit trail record the name the admin uploaded, not `policy_upload_x7f2a1.pdf`.
+
+The ingestion itself also goes through `asyncio.to_thread`, for the same reason as the bootstrap:
+the route is `async def` because reading the upload body is awaitable, so any blocking call inside
+it would stall every other in-flight request, not just this one.
+
+Errors map to distinct statuses so a caller can tell what to do next: 415 for a file type the
+pipeline cannot parse, 413 for one that is too large, 409 for an embedding-model mismatch, 422 when
+parsing produced nothing indexable, 500 for anything else. A skipped duplicate is not an error — it
+returns 200 with `status: "skipped"` and the reason, because re-uploading an unchanged document is
+a reasonable thing to do and the hash check already handles it.
+
+`GET /ingest/status` is the read side: whether anything is indexed, which corpus directory is in
+effect, the active embedding model and whether it matches the stored vectors, and a per-document
+node count. It answers "did the bootstrap actually work" without opening a SQL client.
 
 ---
 
@@ -1425,7 +1585,36 @@ than as a clean bill of health. The golden set uses that deliberately in `cc-08`
 | `/review/queue` | GET | reviewer | Pending escalations, High risk first, then oldest |
 | `/review/{request_id}` | GET | reviewer | The full context package |
 | `/review/{request_id}` | POST | reviewer | Accept / edit / reject; resumes the checkpointed graph |
+| `/ingest` | POST | admin | Upload one policy document; spooled to a temp file, parsed, indexed |
+| `/ingest/status` | GET | admin | Is the corpus indexed, which embedding model, node counts per document |
 | `/health` | GET | — | Database reachability, queue depth, effective config |
+
+`/ingest` takes `multipart/form-data` with a single `file` part and an optional `?force=true` to
+re-index a document whose hash is already known:
+
+```bash
+curl -X POST localhost:8000/ingest \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@data/policies/Supplier_Vendor_Compliance_Policy.pdf"
+```
+
+```json
+{
+  "status": "indexed",
+  "file_name": "Supplier_Vendor_Compliance_Policy.pdf",
+  "doc_type": "vendor_policy",
+  "version": "3.1",
+  "parsed_with": "llamaparse",
+  "total_nodes": 48,
+  "text_nodes": 41,
+  "table_nodes": 6,
+  "image_nodes": 1,
+  "superseded_nodes": 44
+}
+```
+
+A duplicate returns 200 with `"status": "skipped"` and a reason rather than an error. 6.7 covers
+the temp-file handling and the rest of the status mapping.
 
 Five roles, each mapping to a fixed set of document and table scopes in `src/auth/rbac.py`:
 
