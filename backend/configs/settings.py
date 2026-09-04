@@ -1,7 +1,20 @@
+import logging
 from datetime import date
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+MINIMUM_DEADLINES = {
+    "deadline_seconds_standard": 30.0,
+    "deadline_seconds_hybrid": 45.0,
+    "deadline_seconds_agentic": 75.0,
+    "deadline_seconds_high_risk": 90.0,
+}
+
+MINIMUM_TOKEN_BUDGET = 16000
 
 
 class Settings(BaseSettings):
@@ -100,6 +113,30 @@ class Settings(BaseSettings):
 
     rate_limit_standard: str = "30/minute"
     rate_limit_high_risk: str = "10/minute"
+
+    @model_validator(mode="after")
+    def _raise_unworkable_budgets(self):
+        raised = []
+
+        for field, floor in MINIMUM_DEADLINES.items():
+            configured = getattr(self, field)
+
+            if configured < floor:
+                object.__setattr__(self, field, floor)
+                raised.append(f"{field.upper()} {configured} -> {floor}")
+
+        if self.default_token_budget < MINIMUM_TOKEN_BUDGET:
+            raised.append(f"DEFAULT_TOKEN_BUDGET {self.default_token_budget} -> {MINIMUM_TOKEN_BUDGET}")
+            object.__setattr__(self, "default_token_budget", MINIMUM_TOKEN_BUDGET)
+
+        if raised:
+            logger.warning(
+                "budget settings below the workable floor were raised (%s); a request makes seven "
+                "or more model calls, so a smaller budget escalates every answer before it is scored",
+                ", ".join(raised),
+            )
+
+        return self
 
     @property
     def azure_configured(self) -> bool:

@@ -19,7 +19,7 @@ def _parse_date(value) -> date | None:
         return None
 
 
-def to_retrieved_chunk(scored: NodeWithScore, fused: bool) -> RetrievedChunk:
+def to_retrieved_chunk(scored: NodeWithScore, fused: bool, reranked: bool = False) -> RetrievedChunk:
     node = getattr(scored, "node", scored)
     metadata = getattr(node, "metadata", {}) or {}
 
@@ -45,7 +45,9 @@ def to_retrieved_chunk(scored: NodeWithScore, fused: bool) -> RetrievedChunk:
         original_table=metadata.get("original_table"),
     )
 
-    if fused:
+    if reranked:
+        chunk.rerank_score = score
+    elif fused:
         chunk.fused_score = score
     else:
         chunk.dense_score = score
@@ -54,12 +56,16 @@ def to_retrieved_chunk(scored: NodeWithScore, fused: bool) -> RetrievedChunk:
     return chunk
 
 
-def to_retrieved_chunks(nodes: List[NodeWithScore], fused: bool) -> List[RetrievedChunk]:
+def to_retrieved_chunks(
+    nodes: List[NodeWithScore],
+    fused: bool,
+    reranked: bool = False,
+) -> List[RetrievedChunk]:
     chunks: List[RetrievedChunk] = []
     seen: set[str] = set()
 
     for scored in nodes:
-        chunk = to_retrieved_chunk(scored, fused)
+        chunk = to_retrieved_chunk(scored, fused, reranked)
 
         if chunk.chunk_id in seen:
             continue

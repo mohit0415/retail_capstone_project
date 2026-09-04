@@ -1,9 +1,14 @@
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from src.guardrails.pii import redact
 
 CITATION_PATTERN = re.compile(r"\[([^\]]+?§[^\]]+?)\]")
+
+CITATION_NOISE = re.compile(r"[^0-9a-z§.]+")
+
+CITATION_MARKER = re.compile(r"\s*§\s*")
 
 CLAIM_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
@@ -32,6 +37,18 @@ def extract_citations(answer: str) -> list[str]:
     return CITATION_PATTERN.findall(answer)
 
 
+def canonical_citation(citation: str) -> str:
+    text = unicodedata.normalize("NFKC", citation or "").casefold()
+    text = CITATION_NOISE.sub(" ", text)
+    text = CITATION_MARKER.sub(" § ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    while text.endswith("."):
+        text = text[:-1].strip()
+
+    return text
+
+
 def _substantive_sentences(answer: str) -> list[str]:
     sentences = [part.strip() for part in CLAIM_SPLIT.split(answer) if len(part.strip()) > 25]
 
@@ -56,7 +73,8 @@ def run_output_guardrail(answer: str, allowed_citations: list[str]) -> OutputGua
 
     citations = extract_citations(scrubbed)
 
-    unknown = [c for c in citations if c not in allowed_citations]
+    allowed = {canonical_citation(entry) for entry in allowed_citations}
+    unknown = [c for c in citations if canonical_citation(c) not in allowed]
 
     if unknown:
         return OutputGuardOutcome(

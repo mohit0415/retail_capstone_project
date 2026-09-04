@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from configs.llms import model_for
 from src.graph.state import AgentState
-from src.guardrails.output_guard import extract_citations
+from src.guardrails.output_guard import canonical_citation, extract_citations
 from src.retrieval.adapter import format_context as build_context
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.library import COMPLIANCE_VALIDATION
@@ -44,10 +44,12 @@ def _deterministic_defects(state: AgentState) -> list[Defect]:
             )
         ]
 
-    known_clauses = {f"{chunk.document_title} §{chunk.clause_number}" for chunk in chunks}
+    known_clauses = {
+        canonical_citation(f"{chunk.document_title} §{chunk.clause_number}") for chunk in chunks
+    }
 
     for citation in extract_citations(draft.answer):
-        if citation not in known_clauses:
+        if canonical_citation(citation) not in known_clauses:
             defects.append(
                 Defect(
                     defect_type=DefectType.UNGROUNDED_CLAIM,

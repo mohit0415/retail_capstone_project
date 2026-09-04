@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 from configs.database import writable_connection
+from configs.settings import settings
 from src.core.audit import audit_from_state
 from src.core.handoff import generate_reference_id, requested_human, send_escalation_email
 from src.graph.state import AgentState
@@ -89,7 +90,20 @@ def _derive_reason(state: AgentState) -> str:
     confidence = state.get("confidence")
 
     if confidence:
-        return f"confidence {confidence.final_score} is below the release threshold"
+        breakdown = (
+            f"retrieval {confidence.retrieval_score}, "
+            f"validation {confidence.validation_score}, "
+            f"agreement {confidence.source_agreement}, "
+            f"coverage {confidence.coverage}"
+        )
+
+        if confidence.degraded:
+            breakdown += ", degraded"
+
+        return (
+            f"confidence {confidence.final_score} is below the "
+            f"{settings.confidence_threshold} release threshold ({breakdown})"
+        )
 
     return "the system could not certify this answer"
 

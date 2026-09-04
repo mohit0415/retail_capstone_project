@@ -93,3 +93,72 @@ def test_no_evidence_means_no_coverage():
 
     assert breakdown.coverage == 0.0
     assert breakdown.retrieval_score == 0.0
+
+
+def _policy_plan():
+    from src.schemas.enums import EvidencePath
+    from src.schemas.models import EvidencePlan, PlanStep
+
+    return EvidencePlan(
+        path=EvidencePath.RAG,
+        steps=[PlanStep(order=1, source="policy_kb", objective="find the clause", must_prove="period")],
+        required_claims=["seven financial years"],
+    )
+
+
+def _records_plan():
+    from src.schemas.enums import EvidencePath
+    from src.schemas.models import EvidencePlan, PlanStep
+
+    return EvidencePlan(
+        path=EvidencePath.HYBRID,
+        steps=[PlanStep(order=1, source="both", objective="check records", must_prove="due date")],
+        required_claims=["seven financial years"],
+    )
+
+
+def _answer_state(chunk, plan):
+    return {
+        "retrieved_chunks": [chunk],
+        "sql_evidence": None,
+        "validation": ValidationReport(passed=True),
+        "draft": DraftAnswer(answer="Records are kept for seven financial years [Records Retention Policy §4.1]."),
+        "plan": plan,
+        "degraded": False,
+    }
+
+
+def test_a_strong_cross_encoder_score_carries_the_answer_through():
+    breakdown = confidence_node(_answer_state(_chunk(0.86), _policy_plan()))["confidence"]
+
+    assert breakdown.retrieval_score == 0.86
+    assert breakdown.final_score >= 0.75
+
+
+def test_a_weak_cross_encoder_score_escalates():
+    breakdown = confidence_node(_answer_state(_chunk(0.02), _policy_plan()))["confidence"]
+
+    assert breakdown.retrieval_score == 0.02
+    assert breakdown.final_score < 0.75
+
+
+def test_a_document_only_plan_is_not_penalised_for_having_no_records():
+    breakdown = confidence_node(_answer_state(_chunk(0.86), _policy_plan()))["confidence"]
+
+    assert breakdown.source_agreement == 1.0
+
+
+def test_a_plan_that_wanted_records_is_penalised_when_none_arrive():
+    breakdown = confidence_node(_answer_state(_chunk(0.86), _records_plan()))["confidence"]
+
+    assert breakdown.source_agreement == 0.7
+
+
+def test_an_empty_retrieval_scores_no_agreement_at_all():
+    state = _answer_state(_chunk(0.86), _policy_plan())
+    state["retrieved_chunks"] = []
+
+    breakdown = confidence_node(state)["confidence"]
+
+    assert breakdown.source_agreement == 0.0
+    assert breakdown.final_score < 0.75

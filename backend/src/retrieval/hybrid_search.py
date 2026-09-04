@@ -7,7 +7,12 @@ from llama_index.core.schema import QueryBundle
 from configs.settings import settings
 from src.retrieval.adapter import to_retrieved_chunks
 from src.retrieval.fusion import build_fusion_retriever
-from src.retrieval.postprocessors import CurrentVersionFilter, KeepTopN, build_reranker
+from src.retrieval.postprocessors import (
+    CurrentVersionFilter,
+    FlashRankRerank,
+    KeepTopN,
+    build_reranker,
+)
 from src.schemas.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -52,9 +57,14 @@ def retrieve_policy_evidence(
         postprocessor = KeepTopN(top_n=top_n)
         skipped.append("reranker")
 
+    reranked = isinstance(postprocessor, FlashRankRerank)
+
+    if use_rerank and not reranked:
+        logger.info("no cross-encoder is available, so retrieval keeps the fusion order")
+
     nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
 
-    return to_retrieved_chunks(nodes, fused), fused, skipped
+    return to_retrieved_chunks(nodes, fused, reranked), fused, skipped
 
 
 def hybrid_retrieve(

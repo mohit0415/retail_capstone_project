@@ -83,3 +83,37 @@ def test_output_guard_rejects_uncited_claim():
     )
 
     assert outcome.enforcement_failed
+
+
+def test_a_citation_matches_despite_cosmetic_differences():
+    from src.guardrails.output_guard import canonical_citation
+
+    stored = canonical_citation("Information Security Access Control Policy §5")
+
+    for written in (
+        "Information Security & Access Control Policy §5",
+        "information security access control policy §5",
+        "Information Security Access Control Policy § 5",
+        "Information Security Access Control Policy §5.",
+        "Information Security  Access  Control  Policy §5",
+    ):
+        assert canonical_citation(written) == stored
+
+
+def test_an_invented_clause_still_fails_the_canonical_match():
+    from src.guardrails.output_guard import canonical_citation
+
+    stored = canonical_citation("Information Security Access Control Policy §5")
+
+    assert canonical_citation("Information Security Access Control Policy §9") != stored
+    assert canonical_citation("Data Retention And Archival Policy §5") != stored
+
+
+def test_output_guard_accepts_the_printed_title_of_a_retrieved_clause():
+    outcome = run_output_guardrail(
+        "Multi-factor authentication is required for all privileged roles "
+        "[Information Security & Access Control Policy §5].",
+        ["Information Security Access Control Policy §5"],
+    )
+
+    assert not outcome.enforcement_failed

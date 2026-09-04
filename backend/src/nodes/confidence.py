@@ -1,3 +1,6 @@
+from math import exp
+
+from configs.settings import settings
 from src.graph.state import AgentState
 from src.guardrails.output_guard import extract_citations
 from src.observability.tracing import traced_node
@@ -12,26 +15,51 @@ WEIGHTS = {
 
 DEGRADED_PENALTY = 0.10
 
+SQL_ONLY_RETRIEVAL = 0.5
+
+SIMILARITY_FLOOR = 0.20
+
+SIMILARITY_CEILING = 0.65
+
+RECORD_SOURCES = {"compliance_db", "both"}
+
+
+def _rescale(value: float, floor: float, ceiling: float) -> float:
+    if ceiling <= floor:
+        return 0.0
+
+    return min(1.0, max(0.0, (value - floor) / (ceiling - floor)))
+
 
 def _retrieval_score(state: AgentState) -> float:
     chunks = state.get("retrieved_chunks", [])
 
     if not chunks:
-        return 0.5 if state.get("sql_evidence") else 0.0
+        return SQL_ONLY_RETRIEVAL if state.get("sql_evidence") else 0.0
 
-    scored = [c.rerank_score if c.rerank_score is not None else c.fused_score for c in chunks[:5]]
+    leading = chunks[:5]
 
-    if not scored:
+    reranked = [chunk.rerank_score for chunk in leading if chunk.rerank_score is not None]
+
+    if reranked:
+        top = max(reranked)
+
+        if top > 1.0 or top < 0.0:
+            return round(1 / (1 + exp(-top)), 4)
+
+        return round(top, 4)
+
+    dense = [chunk.dense_score for chunk in leading if chunk.dense_score]
+
+    if dense:
+        return round(_rescale(max(dense), SIMILARITY_FLOOR, SIMILARITY_CEILING), 4)
+
+    fused = [chunk.fused_score for chunk in leading if chunk.fused_score]
+
+    if not fused:
         return 0.0
 
-    top = max(scored)
-
-    if state.get("skipped_optional_nodes"):
-        normalised = min(1.0, top * 40) if top < 1 else min(1.0, top)
-    else:
-        normalised = 1 / (1 + pow(2.718281828, -top)) if top <= 10 else 1.0
-
-    return round(min(1.0, max(0.0, normalised)), 4)
+    return round(min(1.0, max(fused) * (settings.rrf_k + 1)), 4)
 
 
 def _validation_score(state: AgentState) -> float:
@@ -48,6 +76,15 @@ def _validation_score(state: AgentState) -> float:
     return round(max(0.0, 1.0 - penalty), 4)
 
 
+def _plan_expects_records(state: AgentState) -> bool:
+    plan = state.get("plan")
+
+    if plan is None:
+        return False
+
+    return any(step.source in RECORD_SOURCES for step in plan.steps)
+
+
 def _agreement_score(state: AgentState) -> float:
     panel = state.get("panel_verdict")
 
@@ -55,10 +92,13 @@ def _agreement_score(state: AgentState) -> float:
         if panel.unresolved_conflict:
             return 0.0
 
-        return round(1.0 - 0.2 * len(panel.dissent), 4)
+        return round(max(0.0, 1.0 - 0.2 * len(panel.dissent)), 4)
 
     has_policy = bool(state.get("retrieved_chunks"))
     has_records = state.get("sql_evidence") is not None
+
+    if not has_policy and not has_records:
+        return 0.0
 
     if has_policy and has_records:
         validation = state.get("validation")
@@ -68,7 +108,10 @@ def _agreement_score(state: AgentState) -> float:
 
         return 1.0
 
-    return 0.7
+    if _plan_expects_records(state):
+        return 0.7
+
+    return 1.0
 
 
 def _coverage_score(state: AgentState) -> float:
@@ -85,7 +128,7 @@ def _coverage_score(state: AgentState) -> float:
         return 0.0
 
     if plan is None or not plan.required_claims:
-        return 0.8 if has_evidence else 0.0
+        return 0.8
 
     answer_lower = draft.answer.lower()
     covered = sum(1 for claim in plan.required_claims if any(
