@@ -2505,3 +2505,5 @@ Worth stating plainly rather than discovering later:
   the tool list per process is an obvious optimisation once a real server is wired in.
 - **Image captioning costs a vision call per image at ingest.** Fine for a seven-document corpus,
   not for a large one; batching or a caption cache would be needed at scale.
+
+
