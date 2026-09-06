@@ -37,6 +37,43 @@ def test_medium_floor_for_expiry_language():
     assert matched
 
 
+def test_anti_bribery_policy_lookup_is_low_not_high():
+    level, matched = lexical_risk_floor(
+        "What is the gift value threshold under the anti-bribery policy?"
+    )
+
+    assert level == "Low"
+    assert matched == []
+
+
+def test_actual_bribe_mention_still_fires_high():
+    level, matched = lexical_risk_floor("A bribe was offered to a store manager")
+
+    assert level == "High"
+    assert "bribe" in matched
+
+
+def test_disposal_date_does_not_fire_dispose_keyword():
+    level, matched = lexical_risk_floor("What is the disposal date field on retention records?")
+
+    assert level == "Low"
+    assert matched == []
+
+
+def test_dispose_verb_still_fires_medium():
+    level, matched = lexical_risk_floor("How do we dispose of old customer records?")
+
+    assert level == "Medium"
+    assert "dispose" in matched
+
+
+def test_non_compliant_hyphenated_keyword_still_matches():
+    level, matched = lexical_risk_floor("Which vendors are non-compliant this quarter?")
+
+    assert level == "Medium"
+    assert "non-compliant" in matched
+
+
 def test_domain_check_accepts_policy_terms():
     ok, _ = is_in_domain("what is the retention period for transaction records")
 

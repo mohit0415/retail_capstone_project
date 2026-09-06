@@ -1,0 +1,42 @@
+===================== RUFF =====================
+All checks passed!
+ruff exit=0
+
+===================== BYTE COMPILE =====================
+Can't list 'scripts'
+compileall exit=0
+
+===================== PYTEST =====================
+tests/test_no_match_diagnosis.py::test_an_unknown_document_scope_is_rejected_at_the_boundary
+    _validated_document_scope(["string"], _principal(Role.STORE_MANAGER))
+
+tests/test_no_match_diagnosis.py::test_a_scope_the_role_cannot_read_is_rejected_too
+    _validated_document_scope(["gdpr"], _principal(Role.STORE_MANAGER))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+215 passed, 3 warnings in 12.99s
+Traceback (most recent call last):
+  File "/tmp/route_demo.py", line 4, in <module>
+    from src.graph.builder import build_graph
+ModuleNotFoundError: No module named 'src'
+/usr/local/lib/python3.11/dist-packages/langgraph/cache/base/__init__.py:8: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+=== graph compiles ===
+nodes: ['agentic_rag', 'clarification', 'compliance_validation', 'confidence_scoring', 'entity_resolution', 'escalation_manager', 'hybrid_path', 'input_guardrail', 'intent_classification', 'multi_agent_panel', 'nl2sql_path', 'output_guardrail', 'planner', 'query_rewrite', 'rag_path', 'reflection', 'risk_assessment', 'safe_refusal']
+
+=== routing decisions, as they appear in the logs ===
+INFO src.nodes.planner :: route intent=record_lookup proposed=rag chosen=nl2sql clamped=True replanned=False reason=intent record_lookup admits ['nl2sql']; the planner proposed rag, so it was clamped to nl2sql because the answer is a row; policy text cannot state what a record holds request_id=demo-record-question-model-said-rag
+INFO src.observability.tracing :: node=planner elapsed_ms=91.02 since_start_ms=91.03 request_id=demo-record-question-model-said-rag
+  -> record-question-model-said-rag: routed=nl2sql
+INFO src.nodes.planner :: route intent=policy_lookup proposed=agentic chosen=rag clamped=True replanned=False reason=intent policy_lookup admits ['rag']; the planner proposed agentic, so it was clamped to rag because the answer is a clause; the database holds no policy text request_id=demo-policy-question-model-said-agentic
+INFO src.observability.tracing :: node=planner elapsed_ms=0.34 since_start_ms=0.35 request_id=demo-policy-question-model-said-agentic
+  -> policy-question-model-said-agentic: routed=rag
+INFO src.nodes.planner :: route intent=compliance_check proposed=agentic chosen=agentic clamped=False replanned=False reason=planner chose agentic, which intent compliance_check admits request_id=demo-compliance-check-model-said-agentic
+INFO src.observability.tracing :: node=planner elapsed_ms=0.32 since_start_ms=0.33 request_id=demo-compliance-check-model-said-agentic
+  -> compliance-check-model-said-agentic: routed=agentic
+INFO src.nodes.planner :: route intent=record_lookup proposed=nl2sql chosen=escalate clamped=True replanned=False reason=this question can only be answered from records and the role is granted no table request_id=demo-record-question-no-table-grant
+INFO src.observability.tracing :: node=planner elapsed_ms=0.3 since_start_ms=0.32 request_id=demo-record-question-no-table-grant
+  -> record-question-no-table-grant: routed=escalate
+INFO src.nodes.planner :: route intent=policy_lookup proposed=rag chosen=high_risk_panel clamped=False replanned=False reason=risk fused to High, so the multi-agent panel is mandatory request_id=demo-high-risk-anything
+INFO src.observability.tracing :: node=planner elapsed_ms=0.21 since_start_ms=0.21 request_id=demo-high-risk-anything
+  -> high-risk-anything: routed=high_risk_panel

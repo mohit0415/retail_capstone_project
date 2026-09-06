@@ -1,7 +1,19 @@
 import time
 from dataclasses import dataclass
 
+from configs.settings import settings
+
 OPTIONAL_TIER_NODES = {"reranker", "confidence_calibration", "thread_summary"}
+
+PATH_DEADLINE_FIELD = {
+    "rag": "deadline_seconds_standard",
+    "nl2sql": "deadline_seconds_standard",
+    "hybrid": "deadline_seconds_hybrid",
+    "agentic": "deadline_seconds_agentic",
+    "high_risk_panel": "deadline_seconds_high_risk",
+}
+
+RELEASE_TIER_NODES = {"output_guardrail", "escalation_manager", "safe_refusal", "clarification"}
 
 NODE_TOKEN_ESTIMATE = {
     "query_rewrite": 600,
@@ -12,6 +24,7 @@ NODE_TOKEN_ESTIMATE = {
     "rag_path": 3000,
     "nl2sql_path": 1200,
     "hybrid_path": 4000,
+    "agentic_rag": 5000,
     "multi_agent_panel": 7000,
     "compliance_validation": 2500,
     "reflection": 900,
@@ -40,6 +53,9 @@ class BudgetGuard:
         return self.token_budget - self.tokens_spent
 
     def check(self, node_name: str) -> BudgetVerdict:
+        if node_name in RELEASE_TIER_NODES:
+            return BudgetVerdict(allowed=True)
+
         estimate = NODE_TOKEN_ESTIMATE.get(node_name, 500)
         optional = node_name in OPTIONAL_TIER_NODES
 
@@ -53,7 +69,10 @@ class BudgetGuard:
             if optional:
                 return BudgetVerdict(allowed=False, reason="token budget exhausted", degrade=True)
 
-            return BudgetVerdict(allowed=False, reason="token budget exhausted")
+            return BudgetVerdict(
+                allowed=False,
+                reason=f"token budget exhausted, {self.tokens_remaining} left and this step needs {estimate}",
+            )
 
         if optional and self.seconds_remaining < 1.0:
             return BudgetVerdict(allowed=False, reason="insufficient headroom for optional node", degrade=True)
@@ -63,7 +82,36 @@ class BudgetGuard:
 
 def guard_from_state(state: dict) -> BudgetGuard:
     return BudgetGuard(
-        deadline_ts=state.get("deadline_ts", time.monotonic() + 4.0),
-        token_budget=state.get("token_budget", 12000),
+        deadline_ts=state.get("deadline_ts", time.monotonic() + settings.deadline_seconds_standard),
+        token_budget=state.get("token_budget", settings.default_token_budget),
         tokens_spent=state.get("tokens_spent", 0),
     )
+
+
+def path_deadline_seconds(path: str) -> float:
+    field = PATH_DEADLINE_FIELD.get(path, "deadline_seconds_standard")
+
+    return float(getattr(settings, field))
+
+
+def widened_deadline(state: dict, seconds: float) -> float | None:
+    started = state.get("started_ts")
+
+    if started is None:
+        return None
+
+    candidate = started + seconds
+
+    if candidate <= state.get("deadline_ts", candidate):
+        return None
+
+    return candidate
+
+
+def widen_for_path(state: dict, path: str) -> dict:
+    widened = widened_deadline(state, path_deadline_seconds(path))
+
+    if widened is None:
+        return {}
+
+    return {"deadline_ts": widened}

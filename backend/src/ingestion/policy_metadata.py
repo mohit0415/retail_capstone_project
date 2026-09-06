@@ -1,9 +1,8 @@
 import hashlib
 import json
 import logging
-import os
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from src.index.models import get_llm
@@ -93,7 +92,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 def file_hash(file_path: str) -> str:
     digest = hashlib.sha256()
 
-    with open(file_path, "rb") as handle:
+    with Path(file_path).open("rb") as handle:
         for block in iter(lambda: handle.read(65536), b""):
             digest.update(block)
 
@@ -138,11 +137,11 @@ def build_structural_metadata(
         "effective_date": effective_date.isoformat(),
         "is_current": True,
         "original_file_name": original_filename,
-        "file_name": os.path.basename(file_path),
+        "file_name": Path(file_path).name,
         "file_type": Path(file_path).suffix.replace(".", ""),
-        "file_size_kb": round(os.path.getsize(file_path) / 1024, 1),
+        "file_size_kb": round(Path(file_path).stat().st_size / 1024, 1),
         "file_hash": file_hash(file_path),
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(UTC).isoformat(),
         "parsed_with": parsed_with,
         "embed_model": "",
         "level": "document",

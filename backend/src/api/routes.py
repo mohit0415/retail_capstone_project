@@ -3,11 +3,12 @@ import os
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Header,
@@ -21,6 +22,7 @@ from fastapi import (
 
 from configs.settings import settings
 from src.api import escalation_service
+from src.auth.rbac import allowed_doc_types
 from src.auth.security import (
     Principal,
     current_principal,
@@ -28,18 +30,23 @@ from src.auth.security import (
     require_corpus_admin,
     require_reviewer,
 )
+from src.core import audit, conversation
 from src.core.idempotency import build_key, idempotency_store
 from src.graph.builder import get_compiled_graph
 from src.graph.state import initial_state
+from src.guardrails.output_guard import canonical_citation
 from src.index.models import active_embed_model_name
 from src.index.vector_index import (
     check_embed_model_compatibility,
+    clear_vector_table,
     indexed_document_summary,
 )
-from src.ingestion.bootstrap import corpus_dir, corpus_is_indexed
-from src.ingestion.pipeline import ingest_file
+from src.ingestion.bootstrap import corpus_dir, corpus_is_indexed, unindexed_files
+from src.ingestion.pipeline import ingest_directory, ingest_file
+from src.observability import slo
 from src.schemas.api import (
     AnswerResponse,
+    AskReleasedResponse,
     AskRequest,
     Citation,
     ClarificationResponse,
@@ -47,41 +54,51 @@ from src.schemas.api import (
     IngestResponse,
     PendingReviewResponse,
     QueueItem,
+    RebuildResponse,
     RefusalResponse,
+    ReviewOutcome,
     ReviewPackage,
     ReviewSubmission,
+    SloReport,
     SqlProof,
+    StageTimings,
     TokenRequest,
     TokenResponse,
 )
-from src.schemas.enums import RiskLevel, TerminalOutcome
+from src.schemas.enums import ReviewDecision, RiskLevel, TerminalOutcome
+from src.schemas.models import DraftAnswer
 
 router = APIRouter()
 
 SUPPORTED_UPLOAD_SUFFIXES = {".md", ".pdf", ".docx", ".txt"}
 
 
-def _deadline_for(query: str) -> float:
-    lowered = query.lower()
+def _validated_document_scope(requested: list[str], principal: Principal) -> list[str]:
+    if not requested:
+        return []
 
-    high_risk_markers = ("breach", "erasure", "terminate", "bribe", "penalty", "sanction")
+    grant = allowed_doc_types(principal.access_scopes)
+    unknown = [value for value in requested if value not in grant]
 
-    if any(marker in lowered for marker in high_risk_markers):
-        return time.monotonic() + settings.deadline_seconds_high_risk
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"document_scope contains {unknown}, which the role "
+                f"'{principal.role.value}' cannot read or which is not a document type. "
+                f"It accepts any of {sorted(grant)}. Leave document_scope out entirely to "
+                f"search everything this role is allowed to see - it only ever narrows."
+            ),
+        )
 
-    compare_markers = ("compliant", "overdue", "expired", "allowed to", "may we", "can we")
-
-    if any(marker in lowered for marker in compare_markers):
-        return time.monotonic() + settings.deadline_seconds_hybrid
-
-    return time.monotonic() + settings.deadline_seconds_standard
+    return requested
 
 
 def _citations_from(final_state: dict) -> list[Citation]:
     seen: dict[str, Citation] = {}
 
     for chunk in final_state.get("retrieved_chunks", []):
-        key = f"{chunk.document_title} §{chunk.clause_number}"
+        key = canonical_citation(chunk.citation)
 
         if key in seen:
             continue
@@ -97,7 +114,15 @@ def _citations_from(final_state: dict) -> list[Citation]:
     cited = final_state["draft"].cited_clauses if final_state.get("draft") else []
 
     if cited:
-        filtered = [seen[key] for key in cited if key in seen]
+        filtered: list[Citation] = []
+        used: set[str] = set()
+
+        for reference in cited:
+            key = canonical_citation(reference)
+
+            if key in seen and key not in used:
+                used.add(key)
+                filtered.append(seen[key])
 
         if filtered:
             return filtered
@@ -120,6 +145,18 @@ def _sql_proof_from(final_state: dict) -> SqlProof | None:
     )
 
 
+def _timings_from(final_state: dict, total_ms: float) -> StageTimings:
+    reached = slo.stage_marks(final_state.get("marks", []))
+
+    return StageTimings(
+        t1_ms=reached.get("t1"),
+        t2_ms=reached.get("t2"),
+        t3_ms=reached.get("t3"),
+        t4_ms=reached.get("t4"),
+        total_ms=round(total_ms, 2),
+    )
+
+
 @router.post("/auth/token", response_model=TokenResponse, tags=["auth"])
 def create_token(payload: TokenRequest) -> TokenResponse:
     token, expires_in = issue_token(payload.user_id, payload.role, payload.departments)
@@ -127,11 +164,33 @@ def create_token(payload: TokenRequest) -> TokenResponse:
     return TokenResponse(access_token=token, expires_in=expires_in)
 
 
-@router.post("/ask", tags=["ask"])
+ASK_RESPONSES = {
+    200: {
+        "model": AskReleasedResponse,
+        "description": (
+            "the request reached a terminal decision the caller can act on. "
+            "'answered' carries the answer with its citations, 'refused' means the request was "
+            "not accepted, 'clarification_required' means an entity in the question was ambiguous. "
+            "Read the 'status' field to tell them apart."
+        ),
+    },
+    202: {
+        "model": PendingReviewResponse,
+        "description": (
+            "the system could not certify an answer and queued it for a human reviewer. "
+            "No draft answer is returned, because the reason it escalated is that this answer "
+            "could not be certified. Poll the returned poll_url for the outcome."
+        ),
+    },
+}
+
+
+@router.post("/ask", tags=["ask"], responses=ASK_RESPONSES)
 def ask(
     payload: AskRequest,
     request: Request,
     response: Response,
+    background: BackgroundTasks,
     principal: Principal = Depends(current_principal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
@@ -143,8 +202,11 @@ def ask(
 
         return cached.payload
 
+    started_ts = time.monotonic()
     request_id = str(uuid.uuid4())
     thread_id = payload.thread_id or str(uuid.uuid4())
+
+    history, summary = conversation.load_thread(thread_id) if payload.thread_id else ([], "")
 
     state = initial_state(
         request_id=request_id,
@@ -153,21 +215,25 @@ def ask(
         role=principal.role.value,
         access_scopes=principal.access_scopes,
         raw_query=payload.query,
-        deadline_ts=_deadline_for(payload.query),
+        started_ts=started_ts,
+        deadline_ts=started_ts + settings.deadline_seconds_standard,
         token_budget=settings.default_token_budget,
+        departments=principal.departments,
+        document_scope_request=_validated_document_scope(payload.document_scope, principal),
+        conversation_history=history,
+        thread_summary=summary,
     )
-
-    state["departments"] = principal.departments
-
-    if payload.document_scope:
-        state["document_scope_request"] = payload.document_scope
 
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 40}
 
     final_state = graph.invoke(state, config=config)
 
-    outcome = final_state.get("terminal_outcome")
+    total_ms = (time.monotonic() - started_ts) * 1000
+    outcome = final_state.get("terminal_outcome") or TerminalOutcome.ESCALATED.value
+    timings = _timings_from(final_state, total_ms)
+
+    slo.record_latency(final_state, total_ms, outcome)
 
     if outcome == TerminalOutcome.REFUSED.value:
         body = RefusalResponse(
@@ -205,8 +271,9 @@ def ask(
             thread_id=thread_id,
             risk_level=risk.final_level.value if risk else RiskLevel.HIGH.value,
             reason=final_state.get("escalation_reason") or "human review required",
-            queued_at=datetime.now(timezone.utc),
+            queued_at=datetime.now(UTC),
             poll_url=str(request.url_for("get_request_status", request_id=request_id)),
+            timings=timings,
         ).model_dump(mode="json")
 
         response.status_code = status.HTTP_202_ACCEPTED
@@ -232,7 +299,17 @@ def ask(
         uncertainty_note=draft.uncertainty_note,
         evidence_path=final_state.get("evidence_path") or "rag",
         degraded=final_state.get("degraded", False),
+        timings=timings,
     ).model_dump(mode="json")
+
+    background.add_task(
+        conversation.record_exchange,
+        thread_id,
+        principal.user_id,
+        request_id,
+        payload.query,
+        draft.answer,
+    )
 
     idempotency_store.put(cache_key, body, status.HTTP_200_OK)
 
@@ -267,7 +344,7 @@ def review_queue(principal: Principal = Depends(require_reviewer)) -> list[Queue
 
 @router.get("/review/{request_id}", response_model=ReviewPackage, tags=["review"])
 def review_package(request_id: str, principal: Principal = Depends(require_reviewer)) -> ReviewPackage:
-    review, row = escalation_service.fetch_package(request_id)
+    review, _ = escalation_service.fetch_package(request_id)
 
     if review is None:
         raise HTTPException(status_code=404, detail="unknown request id")
@@ -275,12 +352,61 @@ def review_package(request_id: str, principal: Principal = Depends(require_revie
     return review
 
 
-@router.post("/review/{request_id}", tags=["review"])
+def _apply_review_to_checkpoint(
+    thread_id: str,
+    decision: ReviewDecision,
+    answer: str,
+    reviewer_id: str,
+    notes: str,
+) -> tuple[bool, dict | None]:
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 40}
+
+    try:
+        snapshot = graph.get_state(config)
+    except Exception:
+        return False, None
+
+    if snapshot is None or not snapshot.values:
+        return False, None
+
+    draft = snapshot.values.get("draft")
+
+    if draft is None:
+        revised = DraftAnswer(answer=answer)
+    else:
+        revised = draft.model_copy(update={"answer": answer})
+
+    update = {
+        "draft": revised,
+        "reviewer_decision": decision.value,
+        "reviewer_id": reviewer_id,
+        "reviewer_notes": notes,
+        "escalation_reason": None,
+        "terminal_outcome": None,
+    }
+
+    try:
+        graph.update_state(config, update)
+    except Exception:
+        return False, None
+
+    if decision is ReviewDecision.REJECT:
+        return True, None
+
+    try:
+        return True, graph.invoke(None, config=config)
+    except Exception:
+        return True, None
+
+
+@router.post("/review/{request_id}", response_model=ReviewOutcome, tags=["review"])
 def submit_review(
     request_id: str,
     submission: ReviewSubmission,
+    background: BackgroundTasks,
     principal: Principal = Depends(require_reviewer),
-):
+) -> ReviewOutcome:
     review, row = escalation_service.fetch_package(request_id)
 
     if row is None:
@@ -302,21 +428,65 @@ def submit_review(
     if not updated:
         raise HTTPException(status_code=409, detail="the request was reviewed by someone else first")
 
-    graph = get_compiled_graph()
-    config = {"configurable": {"thread_id": row["thread_id"]}}
+    resumed, final_state = _apply_review_to_checkpoint(
+        thread_id=row["thread_id"],
+        decision=submission.decision,
+        answer=answer,
+        reviewer_id=principal.user_id,
+        notes=submission.reviewer_notes,
+    )
 
-    try:
-        graph.update_state(
-            config,
-            {
-                "terminal_outcome": TerminalOutcome.ANSWERED.value,
-                "escalation_reason": None,
-            },
+    if submission.decision is ReviewDecision.REJECT:
+        return ReviewOutcome(
+            request_id=request_id,
+            decision=submission.decision.value,
+            resumed=resumed,
+            released=False,
+            outcome=TerminalOutcome.ESCALATED.value,
+            note="the answer was rejected, so nothing was released to the caller",
         )
-    except Exception:
-        pass
 
-    return {"status": "recorded", "request_id": request_id, "decision": submission.decision.value}
+    if not resumed or final_state is None:
+        return ReviewOutcome(
+            request_id=request_id,
+            decision=submission.decision.value,
+            resumed=resumed,
+            released=False,
+            answer=answer,
+            note=(
+                "the decision was recorded, but the graph checkpoint for this thread could not be "
+                "resumed, so the reviewed answer did not pass back through the output guardrail"
+            ),
+        )
+
+    outcome = final_state.get("terminal_outcome")
+    released = outcome == TerminalOutcome.ANSWERED.value
+    released_draft = final_state.get("draft")
+    released_answer = released_draft.answer if released_draft else answer
+
+    if released:
+        background.add_task(
+            conversation.record_exchange,
+            row["thread_id"],
+            row["user_id"],
+            request_id,
+            review.standalone_query or review.original_query,
+            released_answer,
+        )
+
+        note = "the reviewed answer passed the output guardrail and was released"
+    else:
+        note = final_state.get("escalation_reason") or "the reviewed answer did not pass the output guardrail"
+
+    return ReviewOutcome(
+        request_id=request_id,
+        decision=submission.decision.value,
+        resumed=True,
+        released=released,
+        outcome=outcome,
+        answer=released_answer if released else None,
+        note=note,
+    )
 
 
 @router.post("/ingest", response_model=IngestResponse, tags=["corpus"])
@@ -363,12 +533,12 @@ async def ingest_document(
 
         result = await asyncio.to_thread(ingest_file, temp_path, original_name, force)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"ingestion failed for {original_name}: {exc}",
-        )
+        ) from exc
     finally:
         Path(temp_path).unlink(missing_ok=True)
 
@@ -400,7 +570,72 @@ def corpus_status(principal: Principal = Depends(require_corpus_admin)) -> Corpu
         embed_model_compatible=compatible,
         message=message,
         documents=indexed_document_summary(),
+        unindexed_files=unindexed_files(),
     )
+
+
+@router.post("/ingest/rebuild", response_model=RebuildResponse, tags=["corpus"])
+async def rebuild_corpus(
+    confirm: bool = Query(default=False),
+    principal: Principal = Depends(require_corpus_admin),
+) -> RebuildResponse:
+    if not confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this empties the vector table and re-ingests every document in the corpus "
+                "directory, which costs one embedding pass over the whole corpus. "
+                "Call it again with confirm=true if that is what you want."
+            ),
+        )
+
+    directory = corpus_dir()
+
+    if not directory.exists():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"the corpus directory does not exist: {directory}",
+        )
+
+    try:
+        cleared = await asyncio.to_thread(clear_vector_table)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"the vector table could not be cleared: {exc}",
+        ) from exc
+
+    try:
+        report = await asyncio.to_thread(ingest_directory, str(directory))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"the vector table was cleared but re-ingestion failed: {exc}",
+        ) from exc
+
+    return RebuildResponse(
+        cleared_chunks=cleared,
+        corpus_dir=str(directory),
+        embed_model=active_embed_model_name(),
+        indexed_files=[r.file_name for r in report.results if not r.skipped],
+        skipped_files=[
+            {"file_name": r.file_name, "reason": r.reason} for r in report.results if r.skipped
+        ],
+        total_nodes=report.total_nodes,
+        documents=indexed_document_summary(),
+        unindexed_files=unindexed_files(),
+    )
+
+
+@router.get("/metrics/slo", response_model=SloReport, tags=["ops"])
+def slo_metrics(
+    hours: int = Query(default=None, ge=1, le=720),
+    principal: Principal = Depends(require_reviewer),
+) -> SloReport:
+    try:
+        return SloReport(**slo.latency_report(hours or settings.slo_window_hours))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"latency history is unavailable: {exc}") from exc
 
 
 @router.get("/health", tags=["ops"])
@@ -415,8 +650,16 @@ def health():
     return {
         "status": "ok" if database == "up" else "degraded",
         "database": database,
+        "audit_log": audit.circuit.status(),
         "escalation_queue_depth": depth,
         "as_of_date": str(settings.as_of_date),
         "confidence_threshold": settings.confidence_threshold,
+        "deadlines_seconds": {
+            "standard": settings.deadline_seconds_standard,
+            "hybrid": settings.deadline_seconds_hybrid,
+            "agentic": settings.deadline_seconds_agentic,
+            "high_risk": settings.deadline_seconds_high_risk,
+        },
+        "default_token_budget": settings.default_token_budget,
         "azure_configured": settings.azure_configured,
     }

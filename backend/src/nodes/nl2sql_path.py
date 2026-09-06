@@ -10,7 +10,7 @@ from src.graph.state import AgentState
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.library import SQL_NARRATION
 from src.schemas.models import DraftAnswer
-from src.sqlpath.executor import SqlPolicyError, run_nl2sql, sanity_check
+from src.sqlpath.executor import SqlPolicyError, run_vetted_sql, sanity_check
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,15 @@ def _entity_hints(state: AgentState) -> str:
     if not hints:
         return ""
 
-    return "\n\nResolved entities you must use rather than matching on the raw name:\n- " + "\n- ".join(hints)
+    return "\n- ".join(["", *hints]).strip()
+
+
+def _presets(state: AgentState) -> dict:
+    for entity in state.get("resolved_entities", []):
+        if entity.entity_type == "vendor" and entity.resolved_id is not None:
+            return {"vendor_id": entity.resolved_id}
+
+    return {}
 
 
 def run_sql_evidence(state: AgentState):
@@ -37,21 +45,22 @@ def run_sql_evidence(state: AgentState):
     if not tables:
         return None, "this role has no access to the compliance database"
 
-    question = state["standalone_query"] + _entity_hints(state)
-
     try:
-        evidence = run_nl2sql(
-            question=question,
+        evidence = run_vetted_sql(
+            question=state["standalone_query"],
             allowed_tables=tables,
             departments=state.get("departments", []),
             as_of=settings.as_of_date,
             risk_categories=allowed_risk_categories(scopes),
+            presets=_presets(state),
+            entity_hints=_entity_hints(state),
+            config=runnable_config(state, "sql_template_selector"),
         )
     except SqlPolicyError as exc:
-        logger.warning("nl2sql refused: %s", exc)
+        logger.warning("vetted sql refused: %s", exc)
         return None, str(exc)
     except Exception as exc:
-        logger.error("nl2sql failed: %s", exc)
+        logger.error("vetted sql failed: %s", exc)
         return None, "the database probe could not be completed"
 
     return evidence, ""
@@ -68,6 +77,7 @@ def nl2sql_path_node(state: AgentState) -> dict:
                 answer=f"This question could not be answered from the compliance records: {failure}.",
                 uncertainty_note="no database evidence was produced",
             ),
+            "escalation_reason": f"the records path produced no evidence: {failure}",
             "tokens_spent": 900,
         }
 

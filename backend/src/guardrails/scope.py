@@ -39,7 +39,24 @@ IN_DOMAIN_TERMS = {
     "access",
     "disposal",
     "archive",
+    "compliant",
+    "regulation",
+    "regulatory",
+    "risk",
+    "sanction",
+    "remediation",
+    "escalation",
+    "onboarding",
+    "diligence",
+    "personal",
+    "pii",
+    "archival",
+    "certificate",
+    "training",
+    "third",
 }
+
+PLURAL_SUFFIXES = ("ies", "es", "s")
 
 OUT_OF_DOMAIN_MARKERS = [
     re.compile(r"\b(write|compose)\s+(me\s+)?(a\s+)?(poem|song|story|joke)\b", re.I),
@@ -83,6 +100,23 @@ RISK_KEYWORD_FLOORS = {
 }
 
 
+def singular(token: str) -> str:
+    if token in IN_DOMAIN_TERMS:
+        return token
+
+    for suffix in PLURAL_SUFFIXES:
+        if len(token) > len(suffix) + 2 and token.endswith(suffix):
+            stem = token[: -len(suffix)]
+
+            if suffix == "ies":
+                stem = f"{stem}y"
+
+            if stem in IN_DOMAIN_TERMS:
+                return stem
+
+    return token
+
+
 def is_in_domain(text: str) -> tuple[bool, str]:
     lowered = text.lower()
 
@@ -90,7 +124,7 @@ def is_in_domain(text: str) -> tuple[bool, str]:
         if marker.search(lowered):
             return False, "request is outside the retail policy and compliance domain"
 
-    tokens = set(re.findall(r"[a-z0-9']+", lowered))
+    tokens = {singular(token) for token in re.findall(r"[a-z0-9']+", lowered)}
 
     if tokens & IN_DOMAIN_TERMS:
         return True, ""
@@ -103,14 +137,14 @@ def lexical_risk_floor(text: str) -> tuple[str, list[str]]:
     matched: list[str] = []
 
     for keyword in RISK_KEYWORD_FLOORS["High"]:
-        if keyword in lowered:
+        if re.search(rf"\b{re.escape(keyword)}\b", lowered):
             matched.append(keyword)
 
     if matched:
         return "High", matched
 
     for keyword in RISK_KEYWORD_FLOORS["Medium"]:
-        if keyword in lowered:
+        if re.search(rf"\b{re.escape(keyword)}\b", lowered):
             matched.append(keyword)
 
     if matched:

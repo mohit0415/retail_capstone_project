@@ -15,7 +15,15 @@ WEIGHTS = {
 
 DEGRADED_PENALTY = 0.10
 
-SQL_ONLY_RETRIEVAL = 0.5
+EXECUTED_TEMPLATE_EVIDENCE = 0.90
+
+EMPTY_RESULT_EVIDENCE = 0.75
+
+PARTIAL_RESULT_PENALTY = 0.10
+
+GENERATED_QUERY_PENALTY = 0.15
+
+MISSING_EXPECTED_RECORDS = 0.7
 
 SIMILARITY_FLOOR = 0.20
 
@@ -31,11 +39,29 @@ def _rescale(value: float, floor: float, ceiling: float) -> float:
     return min(1.0, max(0.0, (value - floor) / (ceiling - floor)))
 
 
+def _sql_evidence_score(evidence) -> float:
+    if evidence is None:
+        return 0.0
+
+    score = EMPTY_RESULT_EVIDENCE if evidence.row_count == 0 else EXECUTED_TEMPLATE_EVIDENCE
+
+    if evidence.truncated:
+        score -= PARTIAL_RESULT_PENALTY
+
+    if evidence.rows_filtered_by_scope:
+        score -= PARTIAL_RESULT_PENALTY
+
+    if evidence.generated:
+        score -= GENERATED_QUERY_PENALTY
+
+    return round(max(0.0, score), 4)
+
+
 def _retrieval_score(state: AgentState) -> float:
     chunks = state.get("retrieved_chunks", [])
 
     if not chunks:
-        return SQL_ONLY_RETRIEVAL if state.get("sql_evidence") else 0.0
+        return _sql_evidence_score(state.get("sql_evidence"))
 
     leading = chunks[:5]
 
@@ -108,8 +134,8 @@ def _agreement_score(state: AgentState) -> float:
 
         return 1.0
 
-    if _plan_expects_records(state):
-        return 0.7
+    if _plan_expects_records(state) and not has_records:
+        return MISSING_EXPECTED_RECORDS
 
     return 1.0
 

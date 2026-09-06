@@ -1,5 +1,4 @@
 import logging
-from typing import List, Optional
 
 from llama_index.core.schema import QueryBundle
 from llama_index.core.vector_stores import FilterOperator, MetadataFilter, MetadataFilters
@@ -15,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 def dense_search(
     query: str,
-    allowed_doc_types: List[str],
-    doc_scope: Optional[List[str]] = None,
-    top_k: Optional[int] = None,
-) -> List[RetrievedChunk]:
+    allowed_doc_types: list[str],
+    doc_scope: list[str] | None = None,
+    top_k: int | None = None,
+) -> list[RetrievedChunk]:
     index = load_or_create_index()
 
     retriever = index.as_retriever(
@@ -33,18 +32,20 @@ def dense_search(
 
 def lexical_search(
     query: str,
-    allowed_doc_types: List[str],
-    doc_scope: Optional[List[str]] = None,
-    top_k: Optional[int] = None,
-) -> List[RetrievedChunk]:
+    allowed_doc_types: list[str],
+    doc_scope: list[str] | None = None,
+    top_k: int | None = None,
+) -> list[RetrievedChunk]:
     from llama_index.retrievers.bm25 import BM25Retriever
 
     index = load_or_create_index()
 
+    searchable = set(doc_scope) & set(allowed_doc_types) if doc_scope else set(allowed_doc_types)
+
     candidates = [
         node
         for node in index.docstore.docs.values()
-        if (node.metadata or {}).get("doc_type") in allowed_doc_types
+        if (node.metadata or {}).get("doc_type") in searchable
     ]
 
     if not candidates:
@@ -65,7 +66,7 @@ def lexical_search(
     return chunks
 
 
-def fetch_clause(clause_number: str, allowed_doc_types: List[str]) -> RetrievedChunk | None:
+def fetch_clause(clause_number: str, allowed_doc_types: list[str]) -> RetrievedChunk | None:
     index = load_or_create_index()
 
     filters = MetadataFilters(

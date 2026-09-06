@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,14 @@ class SqlProof(BaseModel):
     as_of: str
 
 
+class StageTimings(BaseModel):
+    t1_ms: float | None = None
+    t2_ms: float | None = None
+    t3_ms: float | None = None
+    t4_ms: float | None = None
+    total_ms: float
+
+
 class AnswerResponse(BaseModel):
     status: Literal["answered"] = "answered"
     request_id: str
@@ -40,6 +48,7 @@ class AnswerResponse(BaseModel):
     uncertainty_note: str = ""
     evidence_path: str
     degraded: bool = False
+    timings: StageTimings | None = None
 
 
 class PendingReviewResponse(BaseModel):
@@ -50,6 +59,7 @@ class PendingReviewResponse(BaseModel):
     reason: str
     queued_at: datetime
     poll_url: str
+    timings: StageTimings | None = None
 
 
 class RefusalResponse(BaseModel):
@@ -64,6 +74,12 @@ class ClarificationResponse(BaseModel):
     thread_id: str
     question: str
     candidates: list[dict] = Field(default_factory=list)
+
+
+AskReleasedResponse = Annotated[
+    AnswerResponse | RefusalResponse | ClarificationResponse,
+    Field(discriminator="status"),
+]
 
 
 class TokenRequest(BaseModel):
@@ -108,6 +124,17 @@ class ReviewSubmission(BaseModel):
     reviewer_notes: str = ""
 
 
+class ReviewOutcome(BaseModel):
+    status: Literal["recorded"] = "recorded"
+    request_id: str
+    decision: str
+    resumed: bool
+    released: bool
+    outcome: str | None = None
+    answer: str | None = None
+    note: str = ""
+
+
 class IngestResponse(BaseModel):
     status: Literal["indexed", "skipped"]
     file_name: str
@@ -129,3 +156,59 @@ class CorpusStatusResponse(BaseModel):
     embed_model_compatible: bool
     message: str = ""
     documents: list[dict] = Field(default_factory=list)
+    unindexed_files: list[str] = Field(default_factory=list)
+
+
+class RebuildResponse(BaseModel):
+    cleared_chunks: int
+    corpus_dir: str
+    embed_model: str
+    indexed_files: list[str] = Field(default_factory=list)
+    skipped_files: list[dict] = Field(default_factory=list)
+    total_nodes: int = 0
+    documents: list[dict] = Field(default_factory=list)
+    unindexed_files: list[str] = Field(default_factory=list)
+
+
+class SloStage(BaseModel):
+    stage: str
+    meaning: str
+    p50_ms: float | None = None
+    p95_ms: float | None = None
+    p99_ms: float | None = None
+    target_p95_ms: float
+    meets_slo: bool | None = None
+
+
+class SloTotal(BaseModel):
+    p50_ms: float | None = None
+    p95_ms: float | None = None
+    p99_ms: float | None = None
+    target_p95_ms: float
+    meets_slo: bool | None = None
+
+
+class SloOutcomeCount(BaseModel):
+    outcome: str
+    count: int
+
+
+class SloPathLatency(BaseModel):
+    evidence_path: str
+    count: int
+    total_p95_ms: float | None = None
+    target_p95_ms: float
+    meets_slo: bool | None = None
+
+
+class SloReport(BaseModel):
+    window_hours: int
+    sample_size: int
+    measured_from: str
+    total_target_basis: str
+    stages: list[SloStage]
+    total: SloTotal
+    breached_stages: list[str] = Field(default_factory=list)
+    breached_paths: list[str] = Field(default_factory=list)
+    outcomes: list[SloOutcomeCount] = Field(default_factory=list)
+    evidence_paths: list[SloPathLatency] = Field(default_factory=list)

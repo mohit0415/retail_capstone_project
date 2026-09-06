@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     enable_agentic_path: bool = True
     agent_max_iterations: int = 8
     agentic_min_seconds: float = 3.0
+    hybrid_min_seconds: float = 2.0
 
     mcp_enabled: bool = True
     mcp_required: bool = False
@@ -85,6 +86,7 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: float = 3.0
     sql_statement_timeout_ms: int = 3000
     sql_row_limit: int = 200
+    enable_generated_sql_fallback: bool = True
 
     jwt_secret: str = "change-this-to-a-long-random-string"
     jwt_algorithm: str = "HS256"
@@ -93,11 +95,24 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.75
     max_reflection_retries: int = 2
     panel_repair_passes: int = 1
-    default_token_budget: int = 12000
-    deadline_seconds_standard: float = 4.0
-    deadline_seconds_hybrid: float = 6.0
-    deadline_seconds_agentic: float = 10.0
-    deadline_seconds_high_risk: float = 12.0
+    default_token_budget: int = 16000
+    deadline_seconds_standard: float = 30.0
+    deadline_seconds_hybrid: float = 45.0
+    deadline_seconds_agentic: float = 75.0
+    deadline_seconds_high_risk: float = 90.0
+
+    conversation_window_turns: int = 10
+    conversation_rewrite_turns: int = 5
+    conversation_summary_after_turns: int = 8
+    conversation_summary_input_turns: int = 30
+
+    slo_t1_p95_ms: float = 6000.0
+    slo_t2_p95_ms: float = 9000.0
+    slo_t3_p95_ms: float = 20000.0
+    slo_t4_p95_ms: float = 27000.0
+    slo_total_p95_ms: float = 28000.0
+    slo_path_target_ratio: float = 0.85
+    slo_window_hours: int = 24
 
     retrieval_top_k: int = 20
     rerank_top_n: int = 6
@@ -132,7 +147,8 @@ class Settings(BaseSettings):
         if raised:
             logger.warning(
                 "budget settings below the workable floor were raised (%s); a request makes seven "
-                "or more model calls, so a smaller budget escalates every answer before it is scored",
+                "or more model calls, so a smaller budget escalates every answer before it is scored. "
+                "Fix these in .env rather than relying on this floor",
                 ", ".join(raised),
             )
 

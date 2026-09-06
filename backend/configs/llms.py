@@ -13,11 +13,13 @@ class ModelTier(str, Enum):
 
 TIER_FOR_NODE = {
     "query_rewrite": ModelTier.SMALL,
+    "thread_summary": ModelTier.SMALL,
     "intent_classification": ModelTier.SMALL,
     "entity_resolution": ModelTier.SMALL,
     "risk_l2_classifier": ModelTier.SMALL,
     "planner": ModelTier.SMALL,
     "rag_generate": ModelTier.STRONG,
+    "sql_template_selector": ModelTier.SMALL,
     "nl2sql_intent": ModelTier.SMALL,
     "sql_narration": ModelTier.SMALL,
     "hybrid_generate": ModelTier.STRONG,

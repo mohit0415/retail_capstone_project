@@ -1,6 +1,5 @@
 import logging
 import re
-from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,11 @@ INTERROGATIVE_OPENER = re.compile(
 
 STACKED_STATEMENT = re.compile(r";\s*\S|--|/\*|\bunion\s+all\s+select\b|\bunion\s+select\b", re.I)
 
-CLOCK_READ = re.compile(r"\b(CURRENT_DATE|CURRENT_TIMESTAMP|NOW\s*\(\s*\)|LOCALTIMESTAMP)\b", re.I)
+CLOCK_READ = re.compile(
+    r"\b(?:CURRENT_DATE|CURRENT_TIME|CURRENT_TIMESTAMP|LOCALTIME|LOCALTIMESTAMP)\b"
+    r"|\b(?:NOW|TRANSACTION_TIMESTAMP|STATEMENT_TIMESTAMP|CLOCK_TIMESTAMP|TIMEOFDAY)\s*\(\s*\)",
+    re.I,
+)
 
 BLOCKED_INTENTS = {
     "INSERT",
@@ -81,7 +84,7 @@ Question: {query}
 One-word classification:"""
 
 
-def validate_question_intent(question: str) -> Tuple[bool, str]:
+def validate_question_intent(question: str) -> tuple[bool, str]:
     if not question or not question.strip():
         return False, "the question is empty"
 
@@ -106,7 +109,7 @@ def validate_question_intent(question: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def classify_intent_with_llm(llm, question: str) -> Tuple[bool, str]:
+def classify_intent_with_llm(llm, question: str) -> tuple[bool, str]:
     if not question or not question.strip():
         return True, ""
 
@@ -126,7 +129,7 @@ def classify_intent_with_llm(llm, question: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def validate_generated_sql(statement: str) -> Tuple[bool, str]:
+def validate_generated_sql(statement: str) -> tuple[bool, str]:
     if not statement or not statement.strip():
         return False, "the engine produced no SQL"
 
@@ -150,7 +153,7 @@ def validate_generated_sql(statement: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def assert_tables_in_scope(statement: str, allowed_tables: set[str]) -> Tuple[bool, str]:
+def assert_tables_in_scope(statement: str, allowed_tables: set[str]) -> tuple[bool, str]:
     referenced = set(re.findall(r"\b(?:FROM|JOIN)\s+\"?([a-z_][a-z0-9_]*)\"?", statement, re.I))
 
     out_of_scope = {table.lower() for table in referenced} - {table.lower() for table in allowed_tables}

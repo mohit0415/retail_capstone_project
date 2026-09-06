@@ -11,7 +11,6 @@ dependencies = [
     "langchain==1.0.2",
     "langchain-openai==1.0.0",
     "langchain-text-splitters>=0.3.0",
-
     "llama-index-core>=0.12.0",
     "llama-index-llms-azure-openai>=0.3.0",
     "llama-index-embeddings-azure-openai>=0.3.0",
@@ -19,36 +18,31 @@ dependencies = [
     "llama-index-retrievers-bm25>=0.5.0",
     "llama-index-tools-mcp>=0.2.0",
     "llama-parse>=0.5.0",
-
     "fastapi==0.121.0",
     "uvicorn[standard]==0.38.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
-
     "psycopg[binary,pool]>=3.2.0",
     "psycopg2-binary>=2.9.9",
     "asyncpg>=0.30.0",
     "sqlalchemy>=2.0.30",
     "pgvector>=0.3.6",
-
     "flashrank>=0.2.9",
     "rank-bm25>=0.2.2",
     "stemmer>=0.0.2",
-
     "pdfplumber>=0.11.0",
     "pymupdf>=1.24.0",
     "python-docx>=1.1.2",
-
     "guardrails-ai>=0.6.0",
     "presidio-analyzer>=2.2.355",
     "presidio-anonymizer>=2.2.355",
     "spacy>=3.8.0",
-
     "pyjwt>=2.13.0",
     "slowapi>=0.1.10",
     "python-dotenv>=1.2.1",
     "langfuse>=2.53.0",
     "tenacity>=9.0.0",
+    "llama-index-readers-file>=0.7.0",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +56,46 @@ dev = [
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+extend-exclude = ["3", "data", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
+    "RET",
+    "ARG",
+    "PTH",
+    "T20",
+    "RUF",
+]
+ignore = [
+    "E501",
+    "B008",
+    "RET504",
+    "SIM108",
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002"]
+"scripts/*" = ["T201"]
+"evals/*" = ["T201"]
+"generate_capstone_sql_data.py" = ["T201"]
+"src/api/routes.py" = ["ARG001"]
+"main.py" = ["ARG001"]
+"src/retrieval/postprocessors.py" = ["ARG002"]
+"src/ingestion/extractors/figure_detection.py" = ["RUF005"]
+"src/ingestion/extractors/image_extraction.py" = ["RUF005"]
+"src/ingestion/extractors/table_extraction.py" = ["RUF005"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["configs", "src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

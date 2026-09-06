@@ -6,8 +6,11 @@ from configs.settings import settings
 from src.graph.routing import (
     after_confidence,
     after_entity_resolution,
+    after_escalation,
+    after_evidence,
     after_guardrail,
     after_intent,
+    after_output_guardrail,
     after_risk,
     after_validation,
     route_evidence_path,
@@ -31,6 +34,8 @@ from src.nodes.terminal import clarification_node, output_guardrail_node, refusa
 from src.nodes.validation import compliance_validation_node
 
 logger = logging.getLogger(__name__)
+
+EVIDENCE_NODES = ("rag_path", "nl2sql_path", "hybrid_path", "agentic_rag", "multi_agent_panel")
 
 _checkpointer = None
 _compiled = None
@@ -85,7 +90,7 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "input_guardrail",
         after_guardrail,
-        {"refuse": "safe_refusal", "continue": "query_rewrite"},
+        {"refuse": "safe_refusal", "escalate": "escalation_manager", "continue": "query_rewrite"},
     )
 
     graph.add_edge("query_rewrite", "intent_classification")
@@ -93,13 +98,13 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "intent_classification",
         after_intent,
-        {"refuse": "safe_refusal", "continue": "entity_resolution"},
+        {"refuse": "safe_refusal", "escalate": "escalation_manager", "continue": "entity_resolution"},
     )
 
     graph.add_conditional_edges(
         "entity_resolution",
         after_entity_resolution,
-        {"clarify": "clarification", "continue": "risk_assessment"},
+        {"clarify": "clarification", "escalate": "escalation_manager", "continue": "risk_assessment"},
     )
 
     graph.add_conditional_edges(
@@ -117,11 +122,16 @@ def build_graph() -> StateGraph:
             "hybrid": "hybrid_path",
             "agentic": "agentic_rag",
             "high_risk_panel": "multi_agent_panel",
+            "escalate": "escalation_manager",
         },
     )
 
-    for path_node in ("rag_path", "nl2sql_path", "hybrid_path", "agentic_rag", "multi_agent_panel"):
-        graph.add_edge(path_node, "compliance_validation")
+    for path_node in EVIDENCE_NODES:
+        graph.add_conditional_edges(
+            path_node,
+            after_evidence,
+            {"escalate": "escalation_manager", "continue": "compliance_validation"},
+        )
 
     graph.add_conditional_edges(
         "compliance_validation",
@@ -141,8 +151,18 @@ def build_graph() -> StateGraph:
         {"respond": "output_guardrail", "escalate": "escalation_manager"},
     )
 
-    graph.add_edge("output_guardrail", END)
-    graph.add_edge("escalation_manager", END)
+    graph.add_conditional_edges(
+        "output_guardrail",
+        after_output_guardrail,
+        {"escalate": "escalation_manager", "done": END},
+    )
+
+    graph.add_conditional_edges(
+        "escalation_manager",
+        after_escalation,
+        {"review": "output_guardrail", "wait": END},
+    )
+
     graph.add_edge("safe_refusal", END)
     graph.add_edge("clarification", END)
 

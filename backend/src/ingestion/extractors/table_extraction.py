@@ -1,6 +1,5 @@
 import logging
 import re
-from typing import List, Tuple
 
 from src.ingestion.elements import ClauseSection, RawTable
 
@@ -18,14 +17,14 @@ HTML_TABLE = re.compile(r"<table\b[^>]*>.*?</table>", re.S | re.I)
 PLACEHOLDER = "[table {index} from this clause is indexed as its own node]"
 
 
-def _spans(text: str) -> List[Tuple[int, int, str]]:
+def _spans(text: str) -> list[tuple[int, int, str]]:
     found = [(match.start(), match.end(), match.group(0).strip()) for match in PIPE_TABLE.finditer(text)]
 
     found.extend((match.start(), match.end(), match.group(0).strip()) for match in HTML_TABLE.finditer(text))
 
     found.sort(key=lambda span: span[0])
 
-    kept: List[Tuple[int, int, str]] = []
+    kept: list[tuple[int, int, str]] = []
     cursor = 0
 
     for start, end, block in found:
@@ -38,7 +37,7 @@ def _spans(text: str) -> List[Tuple[int, int, str]]:
     return kept
 
 
-def find_markdown_tables(text: str) -> List[str]:
+def find_markdown_tables(text: str) -> list[str]:
     return [block for _, _, block in _spans(text or "")]
 
 
@@ -60,7 +59,7 @@ def normalize_markdown_table(table_markdown: str) -> str:
     if len(lines) < 2 or not lines[0].strip().startswith("|"):
         return table_markdown
 
-    def cells(line: str) -> List[str]:
+    def cells(line: str) -> list[str]:
         return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
     header = cells(lines[0])
@@ -69,7 +68,7 @@ def normalize_markdown_table(table_markdown: str) -> str:
     if width == 0:
         return table_markdown
 
-    def row(values: List[str]) -> str:
+    def row(values: list[str]) -> str:
         if len(values) < width:
             values = values + [""] * (width - len(values))
         elif len(values) > width:
@@ -85,9 +84,9 @@ def normalize_markdown_table(table_markdown: str) -> str:
     return "\n".join(rebuilt)
 
 
-def extract_tables(sections: List[ClauseSection]) -> Tuple[List[RawTable], List[ClauseSection]]:
-    tables: List[RawTable] = []
-    reduced: List[ClauseSection] = []
+def extract_tables(sections: list[ClauseSection]) -> tuple[list[RawTable], list[ClauseSection]]:
+    tables: list[RawTable] = []
+    reduced: list[ClauseSection] = []
     dropped = 0
 
     for section in sections:

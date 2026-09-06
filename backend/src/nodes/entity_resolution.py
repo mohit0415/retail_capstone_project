@@ -38,6 +38,26 @@ LIMIT 1
 
 FUZZY_THRESHOLD = 0.45
 
+GENERIC_ENTITY_SURFACES = {
+    "vendor",
+    "vendors",
+    "supplier",
+    "suppliers",
+    "the vendor",
+    "the vendors",
+    "all vendors",
+    "any vendor",
+    "each vendor",
+    "third party",
+    "third parties",
+    "department",
+    "departments",
+    "all departments",
+    "store",
+    "stores",
+    "all stores",
+}
+
 
 def _resolve_vendor(surface: str) -> ResolvedEntity:
     with read_only_connection() as conn:
@@ -149,6 +169,9 @@ def entity_resolution_node(state: AgentState) -> dict:
     resolved: list[ResolvedEntity] = []
 
     for span in intent.entities:
+        if span.text.strip().lower() in GENERIC_ENTITY_SURFACES:
+            continue
+
         if span.entity_type == "vendor" and "vendors" in tables:
             resolved.append(_resolve_vendor(span.text))
         elif span.entity_type == "department" and "retention_records" in tables:

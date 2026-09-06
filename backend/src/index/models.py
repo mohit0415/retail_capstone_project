@@ -13,6 +13,7 @@ SMALL_TIER_NODES = {
     "planner",
     "reflection",
     "sql_intent_guard",
+    "nl2sql_generate",
     "table_summary",
     "metadata_extraction",
 }

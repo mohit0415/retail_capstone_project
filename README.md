@@ -1834,24 +1834,19 @@ than as a clean bill of health. The golden set uses that deliberately in `cc-08`
 
 ---
 
-## 12. API guide and contracts
+## 12. API contracts
 
-The usual caller journey is **get a token → check health and corpus → ask a question**. An answer
-that passes the release gate returns `200 answered`; a refused or clarification response also uses
-`200`. A question that needs human review returns `202 pending_review`, after which a reviewer
-decides and the original caller polls for the outcome.
-
-| Endpoint | Method | Role | Use it when | How it behaves |
-|---|---|---|---|---|
-| `/auth/token` | POST | — | Starting a session or replacing an expired token | Send `user_id`, `role`, and optional `departments`; returns the JWT used as `Authorization: Bearer <token>` on protected endpoints. |
-| `/health` | GET | — | Checking whether the service is ready | Returns API status, database status, pending escalation count, configured as-of date, and confidence threshold. |
-| `/ingest/status` | GET | admin | Checking whether policy documents are available for retrieval | Returns corpus/index status, embedding compatibility, and per-document metadata. |
-| `/ingest` | POST | admin | Adding or re-indexing a policy document | Upload one `.pdf`, `.docx`, `.md`, or `.txt` file as `multipart/form-data`; `?force=true` re-indexes an existing file. |
-| `/ask` | POST | any authenticated role | Asking a policy, compliance, or record question | Send `query`, optional `thread_id`, and optional `document_scope`. Returns an answer, refusal, clarification, or a `202` review request. `Idempotency-Key` prevents duplicate work on retries. |
-| `/requests/{request_id}` | GET | any authenticated role | Checking an earlier `202 pending_review` request | Returns `pending_review` until review is complete, then the recorded reviewed answer and decision. |
-| `/review/queue` | GET | reviewer | Finding work that needs human compliance or legal review | Returns pending escalations, ordered High risk first and then oldest first. |
-| `/review/{request_id}` | GET | reviewer | Inspecting all evidence before deciding an escalated case | Returns the question, retrieved documents, SQL evidence, validation output, reasoning trace, risk, confidence, and draft answer. |
-| `/review/{request_id}` | POST | reviewer | Recording a human decision | Send `decision` (`accept`, `edit`, or `reject`), optional `edited_answer`, and optional reviewer notes. A second decision returns `409`. |
+| Endpoint | Method | Role | Purpose |
+|---|---|---|---|
+| `/auth/token` | POST | — | Issue a JWT with role, departments and derived scopes |
+| `/ask` | POST | any | The main entry point; honours `Idempotency-Key` |
+| `/requests/{request_id}` | GET | any | Poll an escalated request |
+| `/review/queue` | GET | reviewer | Pending escalations, High risk first, then oldest |
+| `/review/{request_id}` | GET | reviewer | The full context package |
+| `/review/{request_id}` | POST | reviewer | Accept / edit / reject; resumes the checkpointed graph |
+| `/ingest` | POST | admin | Upload one policy document; spooled to a temp file, parsed, indexed |
+| `/ingest/status` | GET | admin | Is the corpus indexed, which embedding model, node counts per document |
+| `/health` | GET | — | Database reachability, queue depth, effective config |
 
 ### 12.1 Every input, field by field
 
@@ -2507,3 +2502,19 @@ Worth stating plainly rather than discovering later:
   not for a large one; batching or a caption cache would be needed at scale.
 
 
+The usual caller journey is **get a token → check health and corpus → ask a question**. An answer
+that passes the release gate returns `200 answered`; a refused or clarification response also uses
+`200`. A question that needs human review returns `202 pending_review`, after which a reviewer
+decides and the original caller polls for the outcome.
+
+| Endpoint | Method | Role | Use it when | How it behaves |
+|---|---|---|---|---|
+| `/auth/token` | POST | — | Starting a session or replacing an expired token | Send `user_id`, `role`, and optional `departments`; returns the JWT used as `Authorization: Bearer <token>` on protected endpoints. |
+| `/health` | GET | — | Checking whether the service is ready | Returns API status, database status, pending escalation count, configured as-of date, and confidence threshold. |
+| `/ingest/status` | GET | admin | Checking whether policy documents are available for retrieval | Returns corpus/index status, embedding compatibility, and per-document metadata. |
+| `/ingest` | POST | admin | Adding or re-indexing a policy document | Upload one `.pdf`, `.docx`, `.md`, or `.txt` file as `multipart/form-data`; `?force=true` re-indexes an existing file. |
+| `/ask` | POST | any authenticated role | Asking a policy, compliance, or record question | Send `query`, optional `thread_id`, and optional `document_scope`. Returns an answer, refusal, clarification, or a `202` review request. `Idempotency-Key` prevents duplicate work on retries. |
+| `/requests/{request_id}` | GET | any authenticated role | Checking an earlier `202 pending_review` request | Returns `pending_review` until review is complete, then the recorded reviewed answer and decision. |
+| `/review/queue` | GET | reviewer | Finding work that needs human compliance or legal review | Returns pending escalations, ordered High risk first and then oldest first. |
+| `/review/{request_id}` | GET | reviewer | Inspecting all evidence before deciding an escalated case | Returns the question, retrieved documents, SQL evidence, validation output, reasoning trace, risk, confidence, and draft answer. |
+| `/review/{request_id}` | POST | reviewer | Recording a human decision | Send `decision` (`accept`, `edit`, or `reject`), optional `edited_answer`, and optional reviewer notes. A second decision returns `409`. |

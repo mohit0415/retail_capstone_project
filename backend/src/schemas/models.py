@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -87,6 +87,9 @@ class RetrievedChunk(BaseModel):
 
     @property
     def citation(self) -> str:
+        if not self.clause_number:
+            return self.document_title
+
         return f"{self.document_title} §{self.clause_number}"
 
 
@@ -99,6 +102,7 @@ class SqlEvidence(BaseModel):
     as_of: date
     truncated: bool = False
     rows_filtered_by_scope: int = 0
+    generated: bool = False
 
 
 class PanelOpinion(BaseModel):
@@ -155,4 +159,4 @@ class AuditRecord(BaseModel):
     confidence: float | None = None
     outcome: str | None = None
     detail: dict = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

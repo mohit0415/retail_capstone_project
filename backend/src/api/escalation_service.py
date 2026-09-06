@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from configs.database import read_only_connection, writable_connection
 from src.schemas.api import QueueItem, ReviewPackage
@@ -87,7 +87,7 @@ def record_decision(
         "decision": decision.value,
         "answer": edited_answer,
         "notes": notes,
-        "reviewed_at": datetime.now(timezone.utc),
+        "reviewed_at": datetime.now(UTC),
     }
 
     with writable_connection() as conn:

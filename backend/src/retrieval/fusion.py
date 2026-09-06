@@ -1,5 +1,4 @@
 import logging
-from typing import List, Optional
 
 from llama_index.core.retrievers import BaseRetriever, QueryFusionRetriever, VectorIndexAutoRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle
@@ -69,7 +68,7 @@ VECTOR_STORE_INFO = VectorStoreInfo(
 )
 
 
-def build_scope_filters(allowed_doc_types: List[str], doc_scope: Optional[List[str]]) -> MetadataFilters:
+def build_scope_filters(allowed_doc_types: list[str], doc_scope: list[str] | None) -> MetadataFilters:
     effective = [value for value in (doc_scope or allowed_doc_types) if value in allowed_doc_types]
 
     if not effective:
@@ -88,7 +87,7 @@ class AutoWithFallbackRetriever(BaseRetriever):
         self._plain = plain_retriever
         super().__init__()
 
-    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         try:
             nodes = self._auto.retrieve(query_bundle)
         except Exception as exc:
@@ -117,7 +116,7 @@ def _build_vector_retriever(index, filters: MetadataFilters, top_k: int) -> Base
     return AutoWithFallbackRetriever(auto, plain)
 
 
-def _build_bm25_retriever(index, allowed_doc_types: List[str], top_k: int):
+def _build_bm25_retriever(index, allowed_doc_types: list[str], top_k: int):
     try:
         from llama_index.retrievers.bm25 import BM25Retriever
 
@@ -142,9 +141,9 @@ def _build_bm25_retriever(index, allowed_doc_types: List[str], top_k: int):
 
 
 def build_fusion_retriever(
-    allowed_doc_types: List[str],
-    doc_scope: Optional[List[str]] = None,
-    top_k: Optional[int] = None,
+    allowed_doc_types: list[str],
+    doc_scope: list[str] | None = None,
+    top_k: int | None = None,
 ) -> tuple[BaseRetriever, bool]:
     index = load_or_create_index()
     top_k = top_k or settings.retrieval_top_k

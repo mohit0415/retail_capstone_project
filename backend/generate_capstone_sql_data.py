@@ -1,5 +1,6 @@
 import random
 from datetime import datetime, timedelta
+
 import psycopg2
 
 # ---------- CONFIG ----------
@@ -27,22 +28,20 @@ def random_date(start_year=2023, end_year=2026):
 def risk_category(score):
     if score >= 85:
         return "Critical"
-    elif score >= 70:
+    if score >= 70:
         return "High"
-    elif score >= 50:
+    if score >= 50:
         return "Medium"
-    else:
-        return "Low"
+    return "Low"
 
 def severity_from_risk(score):
     if score >= 85:
         return random.choice(["High", "Critical"])
-    elif score >= 70:
+    if score >= 70:
         return random.choice(["Medium", "High"])
-    elif score >= 50:
+    if score >= 50:
         return "Medium"
-    else:
-        return "Low"
+    return "Low"
 
 def main():
     conn = psycopg2.connect(**DB_CONFIG)

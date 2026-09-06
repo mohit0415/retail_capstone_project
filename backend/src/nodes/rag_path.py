@@ -16,10 +16,28 @@ def build_context(chunks: list[RetrievedChunk]) -> str:
     return format_context(chunks)
 
 
+def effective_document_scope(state: AgentState) -> list[str] | None:
+    grant = set(allowed_doc_types(state.get("access_scopes", [])))
+
+    requested = [value for value in state.get("document_scope_request", []) if value in grant]
+
+    intent = state.get("intent")
+    inferred = [value for value in (intent.document_scope if intent else []) if value in grant]
+
+    if requested and inferred:
+        overlap = [value for value in requested if value in set(inferred)]
+
+        return overlap or requested
+
+    if requested:
+        return requested
+
+    return inferred or None
+
+
 def gather_policy_evidence(state: AgentState) -> tuple[list[RetrievedChunk], list[str]]:
     documents = allowed_doc_types(state.get("access_scopes", []))
-    intent = state.get("intent")
-    scope = intent.document_scope if intent else None
+    scope = effective_document_scope(state)
 
     guard = guard_from_state(state)
     verdict = guard.check("reranker")
@@ -27,7 +45,7 @@ def gather_policy_evidence(state: AgentState) -> tuple[list[RetrievedChunk], lis
     chunks, _, skipped = retrieve_policy_evidence(
         query=state["standalone_query"],
         allowed_doc_types=documents,
-        doc_scope=scope or None,
+        doc_scope=scope,
         as_of=settings.as_of_date,
         use_rerank=verdict.allowed,
     )

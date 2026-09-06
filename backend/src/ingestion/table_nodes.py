@@ -1,6 +1,5 @@
 import logging
 import re
-from typing import List
 
 from llama_index.core.schema import TextNode
 
@@ -32,7 +31,7 @@ Table:
 Summary:"""
 
 
-def extract_markdown_tables(markdown: str) -> List[str]:
+def extract_markdown_tables(markdown: str) -> list[str]:
     found = [match.group(0).strip() for match in PIPE_TABLE.finditer(markdown)]
 
     found.extend(match.group(0).strip() for match in HTML_TABLE.finditer(markdown))
@@ -62,14 +61,14 @@ def _fallback_summary(table: str) -> str:
     return summary + ". The full table is preserved in node metadata."
 
 
-def build_table_nodes(markdown: str, base_metadata: dict) -> List[TextNode]:
+def build_table_nodes(markdown: str, base_metadata: dict) -> list[TextNode]:
     tables = extract_markdown_tables(markdown)
 
     if not tables:
         return []
 
     llm = get_llm("table_summary")
-    nodes: List[TextNode] = []
+    nodes: list[TextNode] = []
 
     for position, table in enumerate(tables):
         truncated = table[: settings.max_table_chars]

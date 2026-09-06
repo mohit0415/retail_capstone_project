@@ -1,5 +1,6 @@
+import contextlib
 import logging
-from typing import Any, List, Optional
+from typing import Any
 
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import NodeWithScore, QueryBundle
@@ -28,9 +29,9 @@ class KeepTopN(BaseNodePostprocessor):
 
     def _postprocess_nodes(
         self,
-        nodes: List[NodeWithScore],
-        query_bundle: Optional[QueryBundle] = None,
-    ) -> List[NodeWithScore]:
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
         if not nodes:
             return nodes
 
@@ -54,9 +55,9 @@ class FlashRankRerank(BaseNodePostprocessor):
 
     def _postprocess_nodes(
         self,
-        nodes: List[NodeWithScore],
-        query_bundle: Optional[QueryBundle] = None,
-    ) -> List[NodeWithScore]:
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
         if not nodes or self.ranker is None:
             return nodes[: self.top_n]
 
@@ -84,10 +85,8 @@ class FlashRankRerank(BaseNodePostprocessor):
             for entry in ranked[: self.top_n]:
                 scored = nodes[int(entry["id"])]
 
-                try:
+                with contextlib.suppress(Exception):
                     scored.score = float(entry["score"])
-                except Exception:
-                    pass
 
                 ordered.append(scored)
 
@@ -106,9 +105,9 @@ class CurrentVersionFilter(BaseNodePostprocessor):
 
     def _postprocess_nodes(
         self,
-        nodes: List[NodeWithScore],
-        query_bundle: Optional[QueryBundle] = None,
-    ) -> List[NodeWithScore]:
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
         cutoff = self.as_of or str(settings.as_of_date)
         surviving = []
 

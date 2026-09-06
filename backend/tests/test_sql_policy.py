@@ -14,7 +14,12 @@ from src.guardrails.sql_guard import (
 from src.schemas.enums import Role
 from src.schemas.models import SqlEvidence
 from src.sqlpath.executor import _scope_rows, sanity_check
-from src.sqlpath.templates import TABLE_DESCRIPTIONS, schema_notes_for, tables_visible_to
+from src.sqlpath.templates import (
+    TABLE_DESCRIPTIONS,
+    TEMPLATES,
+    schema_notes_for,
+    tables_visible_to,
+)
 
 
 def test_associate_sees_no_tables():
@@ -85,11 +90,21 @@ def test_schema_notes_carry_the_exact_stored_value_casing():
     assert "In Progress" in notes
 
 
-def test_schema_notes_forbid_the_wall_clock_and_pin_the_date():
+def test_schema_notes_pin_the_as_of_date_and_disclaim_the_clock():
     notes = schema_notes_for({"vendors"})
 
-    assert "CURRENT_DATE" in notes
     assert "2025-12-31" in notes
+    assert "database clock" in notes
+
+
+def test_no_vetted_template_reads_the_wall_clock():
+    clock_functions = ("current_date", "now(", "current_timestamp", "localtimestamp")
+
+    for template in TEMPLATES.values():
+        statement = template.statement.lower()
+
+        for function in clock_functions:
+            assert function not in statement, f"{template.template_id} reads the clock via {function}"
 
 
 def test_schema_notes_separate_the_two_status_columns():

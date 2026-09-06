@@ -2,7 +2,6 @@ import base64
 import logging
 import shutil
 from pathlib import Path
-from typing import List
 
 from llama_index.core.schema import TextNode
 
@@ -27,14 +26,14 @@ def _storage_dir() -> Path:
     return directory
 
 
-def extract_images_from_pdf(file_path: str, output_dir: str) -> List[dict]:
+def extract_images_from_pdf(file_path: str, output_dir: str) -> list[dict]:
     try:
         import fitz
     except ImportError:
         logger.warning("PyMuPDF is not installed; image extraction skipped")
         return []
 
-    extracted: List[dict] = []
+    extracted: list[dict] = []
 
     try:
         document = fitz.open(file_path)
@@ -109,14 +108,14 @@ def generate_caption(image_path: str) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def build_image_nodes(images: List[dict], base_metadata: dict) -> List[TextNode]:
+def build_image_nodes(images: list[dict], base_metadata: dict) -> list[TextNode]:
     if not images:
         return []
 
     storage = _storage_dir()
     source_stem = Path(base_metadata.get("original_file_name", "document")).stem.replace(" ", "_")
 
-    nodes: List[TextNode] = []
+    nodes: list[TextNode] = []
 
     for image in images:
         try:

@@ -1,6 +1,5 @@
 import logging
 from datetime import date
-from typing import List, Optional
 
 from llama_index.core.schema import QueryBundle
 
@@ -20,13 +19,13 @@ logger = logging.getLogger(__name__)
 
 def retrieve_policy_evidence(
     query: str,
-    allowed_doc_types: List[str],
-    doc_scope: Optional[List[str]] = None,
-    as_of: Optional[date] = None,
-    top_k: Optional[int] = None,
-    top_n: Optional[int] = None,
+    allowed_doc_types: list[str],
+    doc_scope: list[str] | None = None,
+    as_of: date | None = None,
+    top_k: int | None = None,
+    top_n: int | None = None,
     use_rerank: bool = True,
-) -> tuple[List[RetrievedChunk], bool, List[str]]:
+) -> tuple[list[RetrievedChunk], bool, list[str]]:
     if not allowed_doc_types:
         return [], False, []
 
@@ -49,7 +48,7 @@ def retrieve_policy_evidence(
 
     nodes = CurrentVersionFilter(as_of=str(as_of)).postprocess_nodes(nodes, query_bundle=bundle)
 
-    skipped: List[str] = []
+    skipped: list[str] = []
 
     if use_rerank:
         postprocessor = build_reranker(top_n)
@@ -69,11 +68,11 @@ def retrieve_policy_evidence(
 
 def hybrid_retrieve(
     query: str,
-    allowed_doc_types: List[str],
-    doc_scope: Optional[List[str]] = None,
-    as_of: Optional[date] = None,
-    top_k: Optional[int] = None,
-) -> List[RetrievedChunk]:
+    allowed_doc_types: list[str],
+    doc_scope: list[str] | None = None,
+    as_of: date | None = None,
+    top_k: int | None = None,
+) -> list[RetrievedChunk]:
     chunks, _, _ = retrieve_policy_evidence(
         query=query,
         allowed_doc_types=allowed_doc_types,
@@ -87,9 +86,9 @@ def hybrid_retrieve(
 
 def widen_retrieval(
     query: str,
-    allowed_doc_types: List[str],
-    as_of: Optional[date] = None,
-) -> List[RetrievedChunk]:
+    allowed_doc_types: list[str],
+    as_of: date | None = None,
+) -> list[RetrievedChunk]:
     chunks, _, _ = retrieve_policy_evidence(
         query=query,
         allowed_doc_types=allowed_doc_types,
@@ -102,7 +101,7 @@ def widen_retrieval(
     return chunks
 
 
-def reciprocal_rank_fusion(dense_hits, lexical_hits, k: Optional[int] = None):
+def reciprocal_rank_fusion(dense_hits, lexical_hits, k: int | None = None):
     k = k or settings.rrf_k
     merged: dict[str, RetrievedChunk] = {}
     scores: dict[str, float] = {}

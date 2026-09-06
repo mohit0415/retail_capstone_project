@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 from llama_index.core.schema import NodeWithScore, TextNode
 

@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from llama_index.core.tools import BaseTool, FunctionTool
 
@@ -41,7 +40,7 @@ class McpToolProvider:
     def configured(self) -> bool:
         return bool(self.url)
 
-    async def load_tools(self) -> List[BaseTool]:
+    async def load_tools(self) -> list[BaseTool]:
         if not self.configured:
             logger.info("MCP_SERVER_URL is not set; the agent runs without external MCP tools")
             return []

@@ -6,11 +6,12 @@ from pydantic import BaseModel, Field
 from configs.database import read_only_connection
 from configs.llms import model_for
 from configs.settings import settings
+from src.core.budget import widen_for_path
 from src.graph.state import AgentState
 from src.guardrails.scope import lexical_risk_floor
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.library import RISK_CLASSIFIER
-from src.schemas.enums import EntityStatus, RiskLevel
+from src.schemas.enums import EntityStatus, EvidencePath, RiskLevel
 from src.schemas.models import RiskAssessment, RiskSignal
 
 logger = logging.getLogger(__name__)
@@ -242,11 +243,12 @@ def risk_assessment_node(state: AgentState) -> dict:
 
     assessment = fuse(signals, unresolved)
 
-    if assessment.disagreement:
-        return {
-            "risk": assessment,
-            "escalation_reason": "risk classifier and database probe disagreed",
-            "tokens_spent": 700,
-        }
+    result = {"risk": assessment, "tokens_spent": 700}
 
-    return {"risk": assessment, "tokens_spent": 700}
+    if assessment.final_level is RiskLevel.HIGH:
+        result.update(widen_for_path(state, EvidencePath.HIGH_RISK_PANEL.value))
+
+    if assessment.disagreement:
+        result["escalation_reason"] = "risk classifier and database probe disagreed"
+
+    return result

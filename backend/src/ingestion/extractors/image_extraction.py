@@ -1,7 +1,6 @@
 import hashlib
 import logging
 from pathlib import Path
-from typing import List
 
 from src.ingestion.elements import RawImage
 from src.ingestion.extractors.figure_detection import RENDER_PADDING, detect_figures
@@ -18,8 +17,8 @@ KIND_RASTER = "raster"
 KIND_FIGURE = "figure"
 
 
-def _embedded_rasters(pymupdf, document, page, page_number, output_dir, seen) -> List[RawImage]:
-    found: List[RawImage] = []
+def _embedded_rasters(pymupdf, document, page, page_number, output_dir, seen) -> list[RawImage]:
+    found: list[RawImage] = []
 
     for image_index, image in enumerate(page.get_images(full=True)):
         try:
@@ -53,8 +52,8 @@ def _embedded_rasters(pymupdf, document, page, page_number, output_dir, seen) ->
     return found
 
 
-def _rendered_figures(pymupdf, page, page_number, output_dir) -> List[RawImage]:
-    found: List[RawImage] = []
+def _rendered_figures(pymupdf, page, page_number, output_dir) -> list[RawImage]:
+    found: list[RawImage] = []
 
     for figure_index, box in enumerate(detect_figures(page)):
         region = (box + (-RENDER_PADDING, -RENDER_PADDING, RENDER_PADDING, RENDER_PADDING)) & page.rect
@@ -76,13 +75,13 @@ def _rendered_figures(pymupdf, page, page_number, output_dir) -> List[RawImage]:
     return found
 
 
-def extract_images_from_pdf(file_path: str, output_dir: str) -> List[RawImage]:
+def extract_images_from_pdf(file_path: str, output_dir: str) -> list[RawImage]:
     pymupdf, document = open_pdf(file_path)
 
     if document is None:
         return []
 
-    extracted: List[RawImage] = []
+    extracted: list[RawImage] = []
     seen: set[str] = set()
 
     try:

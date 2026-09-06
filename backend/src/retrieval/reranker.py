@@ -1,10 +1,9 @@
-from typing import List, Optional
 
 from configs.settings import settings
 from src.schemas.models import RetrievedChunk
 
 
-def rerank(query: str, chunks: List[RetrievedChunk], top_n: Optional[int] = None) -> List[RetrievedChunk]:
+def rerank(query: str, chunks: list[RetrievedChunk], top_n: int | None = None) -> list[RetrievedChunk]:
     top_n = top_n or settings.rerank_top_n
 
     if not chunks:
@@ -14,7 +13,7 @@ def rerank(query: str, chunks: List[RetrievedChunk], top_n: Optional[int] = None
         return chunks[:top_n]
 
     try:
-        from flashrank import RerankRequest, Ranker
+        from flashrank import Ranker, RerankRequest
 
         ranker = Ranker(model_name=settings.flashrank_model, cache_dir=settings.flashrank_cache_dir or None)
 
@@ -33,5 +32,5 @@ def rerank(query: str, chunks: List[RetrievedChunk], top_n: Optional[int] = None
         return chunks[:top_n]
 
 
-def truncate_without_rerank(chunks: List[RetrievedChunk], top_n: Optional[int] = None) -> List[RetrievedChunk]:
+def truncate_without_rerank(chunks: list[RetrievedChunk], top_n: int | None = None) -> list[RetrievedChunk]:
     return chunks[: (top_n or settings.rerank_top_n)]

@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from llama_index.core.base.response.schema import Response
 from llama_index.core.query_engine import CitationQueryEngine
@@ -28,7 +27,7 @@ POLICY_TOOL_DESCRIPTION = (
 )
 
 
-def build_policy_tool(allowed_doc_types: List[str], doc_scope: List[str] | None = None):
+def build_policy_tool(allowed_doc_types: list[str], doc_scope: list[str] | None = None):
     retriever, fused = build_fusion_retriever(allowed_doc_types, doc_scope)
 
     version_filter = CurrentVersionFilter(as_of=str(settings.as_of_date))

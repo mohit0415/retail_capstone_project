@@ -140,3 +140,43 @@ BEGIN
     END IF;
 END
 $$;
+
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    turn_id    BIGSERIAL PRIMARY KEY,
+    thread_id  TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    request_id TEXT,
+    speaker    TEXT NOT NULL CHECK (speaker IN ('user', 'assistant')),
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS conversation_turns_thread_idx ON conversation_turns (thread_id, turn_id DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    thread_id  TEXT PRIMARY KEY,
+    summary    TEXT NOT NULL DEFAULT '',
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS request_latency (
+    latency_id    BIGSERIAL PRIMARY KEY,
+    request_id    TEXT NOT NULL,
+    thread_id     TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    outcome       TEXT NOT NULL,
+    evidence_path TEXT,
+    risk_level    TEXT,
+    degraded      BOOLEAN NOT NULL DEFAULT FALSE,
+    t1_ms         DOUBLE PRECISION,
+    t2_ms         DOUBLE PRECISION,
+    t3_ms         DOUBLE PRECISION,
+    t4_ms         DOUBLE PRECISION,
+    total_ms      DOUBLE PRECISION NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS request_latency_created_idx ON request_latency (created_at DESC);
+CREATE INDEX IF NOT EXISTS request_latency_outcome_idx ON request_latency (outcome, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS request_latency_request_idx ON request_latency (request_id);

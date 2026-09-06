@@ -1,6 +1,5 @@
 import logging
 import types
-from typing import Optional
 
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.schema import BaseNode
@@ -12,7 +11,7 @@ from src.index.models import active_embed_model_name, configure_llama_settings, 
 
 logger = logging.getLogger(__name__)
 
-_index: Optional[VectorStoreIndex] = None
+_index: VectorStoreIndex | None = None
 
 
 def _vector_table_name() -> str:
@@ -22,7 +21,7 @@ def _vector_table_name() -> str:
 def _patch_docstore_missing_nodes(index: VectorStoreIndex) -> None:
     store = index.docstore
 
-    def get_nodes(self, node_ids, raise_error=True):
+    def get_nodes(self, node_ids, raise_error=True):  # noqa: ARG001
         found = []
 
         for node_id in node_ids:
@@ -33,7 +32,7 @@ def _patch_docstore_missing_nodes(index: VectorStoreIndex) -> None:
 
         return found
 
-    async def aget_nodes(self, node_ids, raise_error=True):
+    async def aget_nodes(self, node_ids, raise_error=True):  # noqa: ARG001
         found = []
 
         for node_id in node_ids:
@@ -103,6 +102,21 @@ def reset_index() -> None:
     global _index
 
     _index = None
+
+
+def clear_vector_table() -> int:
+    engine = create_engine(settings.database_url)
+
+    with engine.connect() as conn:
+        row = conn.execute(text(f'SELECT COUNT(*) FROM "{_vector_table_name()}"')).fetchone()
+        removed = int(row[0]) if row else 0
+
+        conn.execute(text(f'TRUNCATE TABLE "{_vector_table_name()}"'))
+        conn.commit()
+
+    reset_index()
+
+    return removed
 
 
 def insert_nodes(nodes: list[BaseNode]) -> int:

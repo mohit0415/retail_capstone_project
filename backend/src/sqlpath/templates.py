@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from typing import Literal
+
 from configs.settings import settings
 
 RISK_CATEGORIES = ["Low", "Medium", "High", "Critical"]
@@ -45,57 +48,383 @@ TABLE_DESCRIPTIONS = {
     ),
 }
 
-SCHEMA_NOTES = f"""Rules you must follow when writing SQL against this database:
+SCHEMA_NOTES = f"""Domain rules the column types do not convey:
 
-- Produce a SELECT (or WITH ... SELECT) statement only. Never write, never modify.
-- Never call CURRENT_DATE, NOW() or CURRENT_TIMESTAMP. Compare against the pinned as-of date
-  '{settings.as_of_date}' written as a literal. Every figure this system reports is pinned to that
-  date so answers stay reproducible and auditable.
-- Always add LIMIT {settings.sql_row_limit} or lower.
-
-Value sets are stored with capitals and spaces exactly as written below. A WHERE clause that
-lowercases them or replaces a space with an underscore matches nothing and returns an empty result,
-which reads as "no problems found" and is the most damaging mistake you can make here:
-- vendors.risk_category: {RISK_CATEGORIES}
-- vendors.compliance_status: {COMPLIANCE_STATUSES}
-- vendors.approval_status: {APPROVAL_STATUSES}
-- audit_logs.issue_severity: {ISSUE_SEVERITIES}
-- audit_logs.remediation_status: {REMEDIATION_STATUSES}
-- compliance_reviews.review_status: {REVIEW_STATUSES}
-- compliance_reviews.review_type: {REVIEW_TYPES}
-- retention_records.approval_status: {RETENTION_APPROVAL_STATUSES}
-- retention_records.department: {DEPARTMENTS}
-Use ILIKE or an exact literal from these lists. Never invent a value outside them.
-
-Domain rules that the column types do not convey:
+- Every figure this system reports is pinned to the as-of date '{settings.as_of_date}'. Nothing reads
+  the database clock, so answers stay reproducible and auditable.
 - compliance_status and approval_status are independent. A vendor can be Approved and
   Non-Compliant at the same time; that combination is exactly what a compliance question is usually
   asking about. Never substitute one column for the other.
 - risk_category is a band over risk_score, not a judgement about the vendor's findings. A vendor in
-  the Low band can still carry a Critical finding in audit_logs, so a question about severity must
-  read audit_logs.issue_severity, not vendors.risk_category.
-- A finding is open when remediation_status <> 'Closed'. resolution_date IS NULL means the same
-  thing; prefer remediation_status.
-- A finding is overdue when target_resolution_date < '{settings.as_of_date}' and remediation_status
-  <> 'Closed'. escalation_flag is a stored value computed when the row was created, so it can
-  disagree with that comparison. When a question asks what is overdue, compute it from the dates.
-  When a question asks what was flagged for escalation, read escalation_flag.
+  the Low band can still carry a Critical finding in audit_logs, so a question about severity reads
+  audit_logs.issue_severity, not vendors.risk_category.
+- A finding is open when remediation_status <> 'Closed'.
+- A finding is overdue when target_resolution_date is before the as-of date and it is still open.
+  escalation_flag is a stored value computed when the row was created, so it can disagree with that
+  comparison. Overdue is computed from the dates; flagged-for-escalation reads escalation_flag.
 - retention_period_years is a duration, not a deadline. There is no stored expiry date, so a
-  retention obligation cannot be called expired from this table. The review cycle is what is
-  trackable: a record is overdue for review when next_review_due < '{settings.as_of_date}'.
-- legal_hold_flag = true means the data is held deliberately for a legal matter. Exclude those rows
-  when counting retention problems unless the question asks about legal holds.
-- A review is outstanding when review_status <> 'Closed'.
-- Every table except vendors joins back to vendors on vendor_id. Join to vendors whenever the answer
-  needs the vendor's name rather than its id.
-- Return the row identifier (vendor_id, audit_id, retention_id or review_id) alongside the columns
-  the question asks about, so the answer can cite which record it came from."""
+  retention obligation cannot be called expired from this table. What is trackable is the review
+  cycle: a record is overdue for review when next_review_due is before the as-of date.
+- legal_hold_flag = true means the data is preserved deliberately for a legal matter. Those rows are
+  excluded from retention problem counts unless the question is about legal holds.
+- A review is outstanding when review_status <> 'Closed'."""
+
+
+@dataclass(frozen=True)
+class TemplateParameter:
+    name: str
+    kind: Literal["int", "string", "enum"]
+    description: str
+    allowed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SqlTemplate:
+    template_id: str
+    answers: str
+    tables: frozenset[str]
+    parameters: tuple[TemplateParameter, ...]
+    statement: str
+
+
+VENDOR_ID = TemplateParameter(
+    name="vendor_id",
+    kind="int",
+    description="numeric vendor_id resolved by entity resolution, never a name",
+)
+
+TEMPLATES: dict[str, SqlTemplate] = {
+    "vendor_profile": SqlTemplate(
+        template_id="vendor_profile",
+        answers="the full compliance snapshot of one named vendor",
+        tables=frozenset({"vendors"}),
+        parameters=(VENDOR_ID,),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_score, risk_category, compliance_status,
+                   approval_status, onboarding_date, last_audit_date, next_review_due
+            FROM vendors
+            WHERE vendor_id = %(vendor_id)s
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_search_by_name": SqlTemplate(
+        template_id="vendor_search_by_name",
+        answers="which vendors match a name fragment, with their status",
+        tables=frozenset({"vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="name_fragment",
+                kind="string",
+                description="part of the vendor name as the user wrote it",
+            ),
+        ),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_category, compliance_status, approval_status
+            FROM vendors
+            WHERE vendor_name ILIKE '%%' || %(name_fragment)s || '%%'
+            ORDER BY vendor_name
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendors_by_compliance_status": SqlTemplate(
+        template_id="vendors_by_compliance_status",
+        answers="which vendors sit in a given compliance status",
+        tables=frozenset({"vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="compliance_status",
+                kind="enum",
+                description="the compliance status being asked about",
+                allowed=tuple(COMPLIANCE_STATUSES),
+            ),
+        ),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_category, compliance_status, approval_status,
+                   last_audit_date, next_review_due
+            FROM vendors
+            WHERE compliance_status = %(compliance_status)s
+            ORDER BY vendor_name
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendors_by_approval_status": SqlTemplate(
+        template_id="vendors_by_approval_status",
+        answers="which vendors sit in a given approval status",
+        tables=frozenset({"vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="approval_status",
+                kind="enum",
+                description="the approval status being asked about",
+                allowed=tuple(APPROVAL_STATUSES),
+            ),
+        ),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_category, compliance_status, approval_status,
+                   onboarding_date
+            FROM vendors
+            WHERE approval_status = %(approval_status)s
+            ORDER BY vendor_name
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendors_by_risk_category": SqlTemplate(
+        template_id="vendors_by_risk_category",
+        answers="which vendors sit in a given risk band",
+        tables=frozenset({"vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="risk_category",
+                kind="enum",
+                description="the risk band being asked about",
+                allowed=tuple(RISK_CATEGORIES),
+            ),
+        ),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_score, risk_category, compliance_status,
+                   approval_status
+            FROM vendors
+            WHERE risk_category = %(risk_category)s
+            ORDER BY risk_score DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendors_review_overdue": SqlTemplate(
+        template_id="vendors_review_overdue",
+        answers="which vendors are past their next review date as of the pinned date",
+        tables=frozenset({"vendors"}),
+        parameters=(),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_category, compliance_status, approval_status,
+                   last_audit_date, next_review_due
+            FROM vendors
+            WHERE next_review_due < %(as_of)s
+            ORDER BY next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_open_findings": SqlTemplate(
+        template_id="vendor_open_findings",
+        answers="the open audit findings raised against one vendor",
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(VENDOR_ID,),
+        statement="""
+            SELECT a.audit_id, a.vendor_id, v.vendor_name, a.policy_reference, a.issue_title,
+                   a.issue_severity, a.remediation_status, a.issue_identified_date,
+                   a.target_resolution_date, a.escalation_flag
+            FROM audit_logs a
+            JOIN vendors v ON v.vendor_id = a.vendor_id
+            WHERE a.vendor_id = %(vendor_id)s
+              AND a.remediation_status <> 'Closed'
+            ORDER BY a.target_resolution_date
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "findings_by_severity": SqlTemplate(
+        template_id="findings_by_severity",
+        answers="every open finding at a given severity, across vendors",
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="issue_severity",
+                kind="enum",
+                description="the finding severity being asked about",
+                allowed=tuple(ISSUE_SEVERITIES),
+            ),
+        ),
+        statement="""
+            SELECT a.audit_id, a.vendor_id, v.vendor_name, a.issue_title, a.issue_severity,
+                   a.remediation_status, a.target_resolution_date
+            FROM audit_logs a
+            JOIN vendors v ON v.vendor_id = a.vendor_id
+            WHERE a.issue_severity = %(issue_severity)s
+              AND a.remediation_status <> 'Closed'
+            ORDER BY a.target_resolution_date
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "overdue_remediation": SqlTemplate(
+        template_id="overdue_remediation",
+        answers="which findings passed their remediation deadline and are still open",
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT a.audit_id, a.vendor_id, v.vendor_name, a.issue_title, a.issue_severity,
+                   a.remediation_status, a.target_resolution_date, a.escalation_flag
+            FROM audit_logs a
+            JOIN vendors v ON v.vendor_id = a.vendor_id
+            WHERE a.remediation_status <> 'Closed'
+              AND a.target_resolution_date < %(as_of)s
+            ORDER BY a.target_resolution_date
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "escalated_open_findings": SqlTemplate(
+        template_id="escalated_open_findings",
+        answers="which open findings carry the stored escalation flag",
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT a.audit_id, a.vendor_id, v.vendor_name, a.issue_title, a.issue_severity,
+                   a.remediation_status, a.target_resolution_date, a.escalation_flag
+            FROM audit_logs a
+            JOIN vendors v ON v.vendor_id = a.vendor_id
+            WHERE a.escalation_flag = TRUE
+              AND a.remediation_status <> 'Closed'
+            ORDER BY a.issue_severity DESC, a.target_resolution_date
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "retention_overdue_review": SqlTemplate(
+        template_id="retention_overdue_review",
+        answers="which retention records are overdue for review, excluding legal holds",
+        tables=frozenset({"retention_records", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT r.retention_id, r.vendor_id, v.vendor_name, r.department, r.data_category,
+                   r.retention_period_years, r.approval_status, r.last_review_date, r.next_review_due
+            FROM retention_records r
+            JOIN vendors v ON v.vendor_id = r.vendor_id
+            WHERE r.next_review_due < %(as_of)s
+              AND r.legal_hold_flag = FALSE
+            ORDER BY r.next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "retention_by_department": SqlTemplate(
+        template_id="retention_by_department",
+        answers="the retention obligations held by one department",
+        tables=frozenset({"retention_records", "vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="department",
+                kind="enum",
+                description="the owning department",
+                allowed=tuple(DEPARTMENTS),
+            ),
+        ),
+        statement="""
+            SELECT r.retention_id, r.vendor_id, v.vendor_name, r.department, r.data_category,
+                   r.retention_period_years, r.legal_hold_flag, r.approval_status, r.next_review_due
+            FROM retention_records r
+            JOIN vendors v ON v.vendor_id = r.vendor_id
+            WHERE r.department = %(department)s
+            ORDER BY r.next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "retention_legal_holds": SqlTemplate(
+        template_id="retention_legal_holds",
+        answers="which retention records are under a legal hold",
+        tables=frozenset({"retention_records", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT r.retention_id, r.vendor_id, v.vendor_name, r.department, r.data_category,
+                   r.legal_hold_flag, r.approval_status, r.next_review_due
+            FROM retention_records r
+            JOIN vendors v ON v.vendor_id = r.vendor_id
+            WHERE r.legal_hold_flag = TRUE
+            ORDER BY v.vendor_name
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_retention_records": SqlTemplate(
+        template_id="vendor_retention_records",
+        answers="the retention records held against one vendor",
+        tables=frozenset({"retention_records", "vendors"}),
+        parameters=(VENDOR_ID,),
+        statement="""
+            SELECT r.retention_id, r.vendor_id, v.vendor_name, r.department, r.data_category,
+                   r.retention_period_years, r.legal_hold_flag, r.approval_status,
+                   r.last_review_date, r.next_review_due
+            FROM retention_records r
+            JOIN vendors v ON v.vendor_id = r.vendor_id
+            WHERE r.vendor_id = %(vendor_id)s
+            ORDER BY r.next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_review_history": SqlTemplate(
+        template_id="vendor_review_history",
+        answers="the review history recorded against one vendor",
+        tables=frozenset({"compliance_reviews", "vendors"}),
+        parameters=(VENDOR_ID,),
+        statement="""
+            SELECT c.review_id, c.vendor_id, v.vendor_name, c.reviewer_name, c.review_type,
+                   c.review_status, c.review_date, c.next_review_due
+            FROM compliance_reviews c
+            JOIN vendors v ON v.vendor_id = c.vendor_id
+            WHERE c.vendor_id = %(vendor_id)s
+            ORDER BY c.review_date DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "open_reviews_by_type": SqlTemplate(
+        template_id="open_reviews_by_type",
+        answers="which reviews of a given type are still outstanding",
+        tables=frozenset({"compliance_reviews", "vendors"}),
+        parameters=(
+            TemplateParameter(
+                name="review_type",
+                kind="enum",
+                description="the kind of review being asked about",
+                allowed=tuple(REVIEW_TYPES),
+            ),
+        ),
+        statement="""
+            SELECT c.review_id, c.vendor_id, v.vendor_name, c.reviewer_name, c.review_type,
+                   c.review_status, c.review_date, c.next_review_due
+            FROM compliance_reviews c
+            JOIN vendors v ON v.vendor_id = c.vendor_id
+            WHERE c.review_type = %(review_type)s
+              AND c.review_status <> 'Closed'
+            ORDER BY c.next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "reviews_due": SqlTemplate(
+        template_id="reviews_due",
+        answers="which reviews fall due on or before the pinned as-of date",
+        tables=frozenset({"compliance_reviews", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT c.review_id, c.vendor_id, v.vendor_name, c.review_type, c.review_status,
+                   c.review_date, c.next_review_due
+            FROM compliance_reviews c
+            JOIN vendors v ON v.vendor_id = c.vendor_id
+            WHERE c.next_review_due <= %(as_of)s
+              AND c.review_status <> 'Closed'
+            ORDER BY c.next_review_due
+            LIMIT %(row_limit)s
+        """,
+    ),
+}
+
+RESERVED_PARAMETERS = {"as_of", "row_limit"}
+
+
+class TemplateBindingError(ValueError):
+    pass
+
+
+def tables_visible_to(allowed_tables: set[str]) -> list[str]:
+    return sorted(table for table in allowed_tables if table in TABLE_DESCRIPTIONS)
+
+
+def templates_visible_to(allowed_tables: set[str]) -> list[SqlTemplate]:
+    granted = set(tables_visible_to(allowed_tables))
+
+    return [template for template in TEMPLATES.values() if template.tables <= granted]
+
+
+def get_template(template_id: str) -> SqlTemplate | None:
+    return TEMPLATES.get(template_id)
 
 
 def schema_notes_for(allowed_tables: set[str]) -> str:
-    lines = [SCHEMA_NOTES, "", "Tables available to this role:"]
+    lines = [SCHEMA_NOTES, "", "Tables this role may read:"]
 
-    for table in sorted(allowed_tables):
+    for table in tables_visible_to(allowed_tables):
         description = TABLE_DESCRIPTIONS.get(table)
 
         if description:
@@ -104,5 +433,76 @@ def schema_notes_for(allowed_tables: set[str]) -> str:
     return "\n".join(lines)
 
 
-def tables_visible_to(allowed_tables: set[str]) -> list[str]:
-    return sorted(table for table in allowed_tables if table in TABLE_DESCRIPTIONS)
+def catalogue_for(templates: list[SqlTemplate]) -> str:
+    lines = []
+
+    for template in templates:
+        lines.append(f"- {template.template_id}: {template.answers}")
+
+        if not template.parameters:
+            lines.append("    parameters: none")
+            continue
+
+        for parameter in template.parameters:
+            detail = f"    parameter {parameter.name} ({parameter.kind}): {parameter.description}"
+
+            if parameter.allowed:
+                detail += f". One of {list(parameter.allowed)}"
+
+            lines.append(detail)
+
+    return "\n".join(lines)
+
+
+def _coerce(parameter: TemplateParameter, raw):
+    if raw is None:
+        raise TemplateBindingError(f"parameter '{parameter.name}' is required but was not supplied")
+
+    if parameter.kind == "int":
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError) as exc:
+            raise TemplateBindingError(
+                f"parameter '{parameter.name}' must be a whole number, got {raw!r}"
+            ) from exc
+
+    value = str(raw).strip()
+
+    if not value:
+        raise TemplateBindingError(f"parameter '{parameter.name}' was empty")
+
+    if parameter.kind == "enum":
+        for candidate in parameter.allowed:
+            if candidate.casefold() == value.casefold():
+                return candidate
+
+        raise TemplateBindingError(
+            f"parameter '{parameter.name}' must be one of {list(parameter.allowed)}, got {value!r}"
+        )
+
+    return value
+
+
+def bind_parameters(template: SqlTemplate, supplied: dict, as_of, row_limit: int | None = None) -> dict:
+    bound = {
+        "as_of": as_of,
+        "row_limit": row_limit or settings.sql_row_limit,
+    }
+
+    supplied = supplied or {}
+
+    for parameter in template.parameters:
+        bound[parameter.name] = _coerce(parameter, supplied.get(parameter.name))
+
+    unexpected = set(supplied) - {p.name for p in template.parameters} - RESERVED_PARAMETERS
+
+    if unexpected:
+        raise TemplateBindingError(
+            f"template '{template.template_id}' does not accept {sorted(unexpected)}"
+        )
+
+    return bound
+
+
+def flatten(statement: str) -> str:
+    return " ".join(statement.split())

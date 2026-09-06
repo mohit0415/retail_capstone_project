@@ -7,7 +7,17 @@ from src.schemas.enums import TerminalOutcome
 
 @traced_node("output_guardrail")
 def output_guardrail_node(state: AgentState) -> dict:
-    draft = state["draft"]
+    draft = state.get("draft")
+
+    if draft is None:
+        result = {
+            "terminal_outcome": TerminalOutcome.ESCALATED.value,
+            "escalation_reason": "there was no drafted answer to release",
+        }
+
+        audit_from_state({**state, **result}, node="output_guardrail", event="rejected")
+
+        return result
 
     allowed = [f"{chunk.document_title} §{chunk.clause_number}" for chunk in state.get("retrieved_chunks", [])]
 
@@ -19,7 +29,16 @@ def output_guardrail_node(state: AgentState) -> dict:
             "escalation_reason": f"output guardrail rejected the answer: {outcome.failure_reason}",
         }
 
-        audit_from_state({**state, **result}, node="output_guardrail", event="rejected")
+        audit_from_state(
+            {**state, **result},
+            node="output_guardrail",
+            event="rejected",
+            detail={
+                "failure_reason": outcome.failure_reason,
+                "pii_removed": outcome.pii_removed,
+                "after_human_review": bool(state.get("reviewer_decision")),
+            },
+        )
 
         return result
 
@@ -28,6 +47,7 @@ def output_guardrail_node(state: AgentState) -> dict:
     result = {
         "draft": cleaned,
         "terminal_outcome": TerminalOutcome.ANSWERED.value,
+        "escalation_reason": None,
     }
 
     audit_from_state(
@@ -38,6 +58,7 @@ def output_guardrail_node(state: AgentState) -> dict:
             "citation_coverage": outcome.citation_coverage,
             "pii_removed": outcome.pii_removed,
             "evidence_path": state.get("evidence_path"),
+            "after_human_review": bool(state.get("reviewer_decision")),
         },
     )
 

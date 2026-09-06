@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from src.ingestion.extractors.pdf_backend import load_pymupdf, open_pdf
 
@@ -119,7 +118,7 @@ def _absorb_labels(pymupdf, page, box):
     return grown
 
 
-def detect_figures(page) -> List:
+def detect_figures(page) -> list:
     pymupdf = load_pymupdf()
 
     if pymupdf is None:
@@ -143,7 +142,7 @@ def detect_figures(page) -> List:
 
 
 def count_figure_pages(file_path: str) -> int:
-    pymupdf, document = open_pdf(file_path)
+    _pymupdf, document = open_pdf(file_path)
 
     if document is None:
         return 0

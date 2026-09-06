@@ -1,6 +1,5 @@
 import logging
 import threading
-from typing import List, Tuple
 
 from configs.settings import settings
 
@@ -34,8 +33,9 @@ class GuardrailsAiScrubber:
             return
 
         try:
-            from guardrails import Guard
             from guardrails.hub import DetectPII
+
+            from guardrails import Guard
 
             configured = [item.strip() for item in settings.pii_entities.split(",") if item.strip()]
             entities = configured or DEFAULT_PII_ENTITIES
@@ -49,7 +49,7 @@ class GuardrailsAiScrubber:
         except Exception as exc:
             logger.warning("Guardrails AI could not be initialised (%s); using the local fallback", exc)
 
-    def scrub(self, text: str) -> Tuple[bool, str, List[str]]:
+    def scrub(self, text: str) -> tuple[bool, str, list[str]]:
         if not self.available or not text:
             return True, text, []
 

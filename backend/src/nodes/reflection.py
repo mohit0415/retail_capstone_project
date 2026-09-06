@@ -53,10 +53,20 @@ def reflection_node(state: AgentState) -> dict:
     revised = outcome.revised_plan
     revised.revision = (previous_plan.revision + 1) if previous_plan else 1
 
+    directive = (
+        "This is a re-plan. The previous attempt produced these defects:\n"
+        f"{defect_text}\n"
+        f"The reflection step decided: {outcome.reasoning}\n"
+        "The new plan must gather the evidence the previous one missed."
+    )
+
     return {
         "plan": revised,
+        "plan_from_reflection": True,
+        "replan_directive": directive,
         "reflection_count": state.get("reflection_count", 0) + 1,
-        "retrieved_chunks": [],
+        "retrieved_chunks": None,
+        "sql_evidence": None,
         "draft": None,
         "validation": None,
         "tokens_spent": 900,

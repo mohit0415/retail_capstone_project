@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from llama_index.core.schema import TextNode
 
@@ -63,8 +62,8 @@ class TableProcessor:
 
             return structural_summary(truncated)
 
-    def process(self, tables: List[RawTable], document_metadata: dict) -> List[TextNode]:
-        nodes: List[TextNode] = []
+    def process(self, tables: list[RawTable], document_metadata: dict) -> list[TextNode]:
+        nodes: list[TextNode] = []
 
         for table in tables:
             summary = self._summarise(table.markdown)

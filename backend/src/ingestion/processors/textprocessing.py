@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from llama_index.core import Document
 from llama_index.core.schema import BaseNode, TextNode
@@ -23,7 +22,7 @@ class TextProcessor:
 
         return self.semantic
 
-    def _split(self, text: str) -> List[str]:
+    def _split(self, text: str) -> list[str]:
         document = Document(text=text)
 
         try:
@@ -33,7 +32,7 @@ class TextProcessor:
             logger.warning("semantic splitting failed, using the recursive splitter: %s", exc)
             pieces = self.recursive.split_text(text)
 
-        bounded: List[str] = []
+        bounded: list[str] = []
 
         for piece in pieces:
             if len(piece) > settings.max_chunk_chars:
@@ -43,8 +42,8 @@ class TextProcessor:
 
         return [piece for piece in bounded if piece.strip()]
 
-    def process(self, sections: List[ClauseSection], document_metadata: dict) -> List[BaseNode]:
-        nodes: List[BaseNode] = []
+    def process(self, sections: list[ClauseSection], document_metadata: dict) -> list[BaseNode]:
+        nodes: list[BaseNode] = []
 
         for section in sections:
             if not section.body.strip():

@@ -1,5 +1,3 @@
-import re
-from typing import List
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_index.core import Document
@@ -8,6 +6,7 @@ from llama_index.core.schema import BaseNode, TextNode
 
 from configs.settings import settings
 from src.index.models import get_embed_model
+from src.ingestion.extractors.clause_extraction import CLAUSE_HEADING
 
 STRUCTURAL_KEYS = [
     "file_name",
@@ -18,11 +17,6 @@ STRUCTURAL_KEYS = [
     "file_hash",
     "parsed_with",
 ]
-
-CLAUSE_HEADING = re.compile(
-    r"^(#{1,4})\s*(?:§\s*)?([0-9]+(?:\.[0-9]+)*|[A-Z]\.[0-9]+(?:\.[0-9]+)*)\s+(.+)$",
-    re.M,
-)
 
 RECURSIVE_SEPARATORS = [
     "\n## ",
@@ -53,13 +47,13 @@ def build_semantic_splitter() -> SemanticSplitterNodeParser:
     )
 
 
-def split_by_clause(markdown: str) -> List[tuple[str, str, str]]:
+def split_by_clause(markdown: str) -> list[tuple[str, str, str]]:
     matches = list(CLAUSE_HEADING.finditer(markdown))
 
     if not matches:
         return [("general", "1", markdown.strip())]
 
-    sections: List[tuple[str, str, str]] = []
+    sections: list[tuple[str, str, str]] = []
 
     for position, match in enumerate(matches):
         clause_number = match.group(2)
@@ -86,12 +80,12 @@ class ClauseAwareSplitter:
 
         return self.semantic
 
-    def _recursive_fallback(self, text: str, metadata: dict) -> List[BaseNode]:
+    def _recursive_fallback(self, text: str, metadata: dict) -> list[BaseNode]:
         pieces = self.recursive.split_text(text)
 
         return [TextNode(text=piece, metadata=dict(metadata)) for piece in pieces if piece.strip()]
 
-    def split_section(self, text: str, metadata: dict) -> List[BaseNode]:
+    def split_section(self, text: str, metadata: dict) -> list[BaseNode]:
         if not text or not text.strip():
             return []
 
@@ -102,7 +96,7 @@ class ClauseAwareSplitter:
         except Exception:
             nodes = self._recursive_fallback(text, metadata)
 
-        safe: List[BaseNode] = []
+        safe: list[BaseNode] = []
 
         for node in nodes:
             content = node.get_content()
@@ -121,8 +115,8 @@ class ClauseAwareSplitter:
 
         return safe
 
-    def split_document(self, markdown: str, base_metadata: dict) -> List[BaseNode]:
-        nodes: List[BaseNode] = []
+    def split_document(self, markdown: str, base_metadata: dict) -> list[BaseNode]:
+        nodes: list[BaseNode] = []
 
         for section, clause_number, body in split_by_clause(markdown):
             metadata = {

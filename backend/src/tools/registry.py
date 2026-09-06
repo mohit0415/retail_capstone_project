@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import List
 
 from llama_index.core.tools import BaseTool
 
@@ -12,7 +11,7 @@ from src.tools.policy_tool import build_policy_tool
 logger = logging.getLogger(__name__)
 
 
-def _load_mcp_tools() -> List[BaseTool]:
+def _load_mcp_tools() -> list[BaseTool]:
     provider = get_mcp_provider()
 
     if not provider.configured:
@@ -41,15 +40,15 @@ def _load_mcp_tools() -> List[BaseTool]:
 
 
 def build_tools_for(
-    access_scopes: List[str],
-    departments: List[str] | None = None,
-    doc_scope: List[str] | None = None,
+    access_scopes: list[str],
+    departments: list[str] | None = None,
+    doc_scope: list[str] | None = None,
     include_mcp: bool = True,
-) -> List[BaseTool]:
+) -> list[BaseTool]:
     documents = allowed_doc_types(access_scopes)
     tables = allowed_tables(access_scopes)
 
-    tools: List[BaseTool] = []
+    tools: list[BaseTool] = []
 
     if documents:
         try:
@@ -72,5 +71,5 @@ def build_tools_for(
     return tools
 
 
-def tool_names(tools: List[BaseTool]) -> List[str]:
+def tool_names(tools: list[BaseTool]) -> list[str]:
     return [tool.metadata.name for tool in tools]

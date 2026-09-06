@@ -278,14 +278,14 @@ def test_a_document_with_no_recognisable_type_is_refused(tmp_path, monkeypatch):
     path = tmp_path / "scan_0042.md"
     path.write_text("Some prose with no clause numbers.", encoding="utf-8")
 
-    monkeypatch.setattr(document_module, "extract_content_metadata", lambda body: dict(
-        topic="unknown",
-        keywords=[],
-        owning_department="all",
-        content_domain="mixed",
-        intended_route="rag",
-        summary="",
-    ))
+    monkeypatch.setattr(document_module, "extract_content_metadata", lambda _body: {
+        "topic": "unknown",
+        "keywords": [],
+        "owning_department": "all",
+        "content_domain": "mixed",
+        "intended_route": "rag",
+        "summary": "",
+    })
 
     parsed = ParsedDocument(text="body", route=ParseRoute(parser="llamaindex", reason="text only"))
 

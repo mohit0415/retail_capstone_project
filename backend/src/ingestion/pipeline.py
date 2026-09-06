@@ -2,7 +2,6 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 from llama_index.core.schema import BaseNode
 
@@ -56,7 +55,7 @@ class IngestionResult:
 
 @dataclass
 class IngestionReport:
-    results: List[IngestionResult] = field(default_factory=list)
+    results: list[IngestionResult] = field(default_factory=list)
 
     @property
     def total_nodes(self) -> int:
@@ -87,7 +86,7 @@ def build_media_nodes(file_path: str, parsed: ParsedDocument, sections, document
     return table_nodes, image_nodes, reduced
 
 
-def build_nodes(file_path: str, original_filename: str) -> tuple[List[BaseNode], dict, ParsedDocument]:
+def build_nodes(file_path: str, original_filename: str) -> tuple[list[BaseNode], dict, ParsedDocument]:
     parsed = load_document(file_path)
 
     frontmatter, body = parse_frontmatter(parsed.text)
@@ -107,7 +106,7 @@ def build_nodes(file_path: str, original_filename: str) -> tuple[List[BaseNode],
         file_path, parsed, sections, document_metadata
     )
 
-    nodes: List[BaseNode] = TextProcessor().process(sections, document_metadata)
+    nodes: list[BaseNode] = TextProcessor().process(sections, document_metadata)
     nodes.extend(table_nodes)
     nodes.extend(image_nodes)
 
@@ -116,7 +115,7 @@ def build_nodes(file_path: str, original_filename: str) -> tuple[List[BaseNode],
     return nodes, document_metadata, parsed
 
 
-def count_nodes(nodes: List[BaseNode], content_type: str) -> int:
+def count_nodes(nodes: list[BaseNode], content_type: str) -> int:
     return sum(1 for node in nodes if node.metadata.get("content_type") == content_type)
 
 
@@ -164,7 +163,7 @@ def ingest_directory(directory: str, force: bool = False) -> IngestionReport:
 
     report = IngestionReport()
 
-    paths: List[Path] = []
+    paths: list[Path] = []
 
     for pattern in INGESTABLE_PATTERNS:
         paths.extend(sorted(Path(directory).glob(pattern)))

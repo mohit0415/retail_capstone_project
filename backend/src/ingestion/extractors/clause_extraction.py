@@ -1,10 +1,12 @@
+import html
 import re
-from typing import List
 
 from src.ingestion.elements import ClauseSection
 
 CLAUSE_HEADING = re.compile(
-    r"^(#{1,4})\s*(?:§\s*)?([0-9]+(?:\.[0-9]+)*|[A-Z]\.[0-9]+(?:\.[0-9]+)*)\s+(.+)$",
+    r"^(#{1,4})\s*(?:(?:§|Section|Clause|Article)\s*)?"
+    r"([0-9]+(?:\.[0-9]+)*|[A-Z](?:\.[0-9]+)+)"
+    r"\.?\s+(.+)$",
     re.M,
 )
 
@@ -13,7 +15,11 @@ UNNUMBERED_HEADING = "General"
 UNNUMBERED_CLAUSE = "1"
 
 
-def extract_clauses(markdown: str) -> List[ClauseSection]:
+def clean_heading(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
+def extract_clauses(markdown: str) -> list[ClauseSection]:
     text = markdown or ""
 
     matches = list(CLAUSE_HEADING.finditer(text))
@@ -26,7 +32,7 @@ def extract_clauses(markdown: str) -> List[ClauseSection]:
 
         return [ClauseSection(heading=UNNUMBERED_HEADING, clause_number=UNNUMBERED_CLAUSE, body=body, order=0)]
 
-    sections: List[ClauseSection] = []
+    sections: list[ClauseSection] = []
 
     for position, match in enumerate(matches):
         start = match.end()
@@ -39,7 +45,7 @@ def extract_clauses(markdown: str) -> List[ClauseSection]:
 
         sections.append(
             ClauseSection(
-                heading=match.group(3).strip(),
+                heading=clean_heading(match.group(3)),
                 clause_number=match.group(2),
                 body=body,
                 order=len(sections),

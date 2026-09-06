@@ -4,7 +4,7 @@ import logging
 import secrets
 import smtplib
 from email.mime.text import MIMEText
-from typing import Any, Dict, List
+from typing import Any
 
 from configs.settings import settings
 
@@ -28,7 +28,7 @@ EXPLICIT_HANDOFF_PHRASES = (
 
 
 def generate_reference_id(now: datetime.datetime | None = None) -> str:
-    now = now or datetime.datetime.now(datetime.timezone.utc)
+    now = now or datetime.datetime.now(datetime.UTC)
 
     return f"ESC-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
 
@@ -39,7 +39,7 @@ def requested_human(question: str) -> bool:
     return any(phrase in lowered for phrase in EXPLICIT_HANDOFF_PHRASES)
 
 
-def _missing_smtp_settings() -> List[str]:
+def _missing_smtp_settings() -> list[str]:
     return [
         name
         for name, value in (
@@ -53,7 +53,7 @@ def _missing_smtp_settings() -> List[str]:
     ]
 
 
-def send_escalation_email(context: Dict[str, Any]) -> bool:
+def send_escalation_email(context: dict[str, Any]) -> bool:
     if not settings.escalation_email_enabled:
         return False
 

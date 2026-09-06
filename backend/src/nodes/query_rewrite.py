@@ -1,16 +1,15 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from configs.llms import model_for
+from configs.settings import settings
 from src.graph.state import AgentState
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.library import QUERY_REWRITE
 from src.schemas.models import RewriteResult
 
-RECENT_TURN_WINDOW = 5
-
 
 def _format_turns(history: list[dict]) -> str:
-    window = history[-RECENT_TURN_WINDOW:]
+    window = history[-settings.conversation_rewrite_turns:]
 
     if not window:
         return "(no earlier turns)"

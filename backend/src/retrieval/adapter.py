@@ -1,5 +1,4 @@
 from datetime import date
-from typing import List
 
 from llama_index.core.schema import NodeWithScore
 
@@ -57,11 +56,11 @@ def to_retrieved_chunk(scored: NodeWithScore, fused: bool, reranked: bool = Fals
 
 
 def to_retrieved_chunks(
-    nodes: List[NodeWithScore],
+    nodes: list[NodeWithScore],
     fused: bool,
     reranked: bool = False,
-) -> List[RetrievedChunk]:
-    chunks: List[RetrievedChunk] = []
+) -> list[RetrievedChunk]:
+    chunks: list[RetrievedChunk] = []
     seen: set[str] = set()
 
     for scored in nodes:
@@ -76,14 +75,14 @@ def to_retrieved_chunks(
     return chunks
 
 
-def format_context(chunks: List[RetrievedChunk]) -> str:
+def format_context(chunks: list[RetrievedChunk]) -> str:
     from src.guardrails.injection import neutralise_retrieved
 
     blocks = []
 
     for chunk in chunks:
         header = (
-            f"[{chunk.document_title} §{chunk.clause_number}] "
+            f"[{chunk.citation}] "
             f"section: {chunk.section} | version: {chunk.version} | modality: {chunk.modality}"
         )
 
@@ -92,6 +91,6 @@ def format_context(chunks: List[RetrievedChunk]) -> str:
         if chunk.original_table:
             body = f"{body}\n\nOriginal table:\n{chunk.original_table}"
 
-        blocks.append(neutralise_retrieved(f"{header}\n{body}", source=chunk.chunk_id))
+        blocks.append(neutralise_retrieved(f"{header}\n{body}", source=chunk.citation))
 
     return "\n\n".join(blocks) if blocks else "(no policy extract was retrieved)"

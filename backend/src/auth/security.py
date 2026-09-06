@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -45,7 +45,7 @@ class BearerToken(HTTPBearer):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=MISSING_TOKEN_DETAIL,
                 headers=CHALLENGE,
-            )
+            ) from None
 
 
 @dataclass(slots=True)
@@ -61,7 +61,7 @@ bearer_scheme = BearerToken(auto_error=True)
 
 def issue_token(user_id: str, role: Role, departments: list[str]) -> tuple[str, int]:
     expires_in = settings.jwt_expiry_minutes * 60
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     claims = {
         "sub": user_id,
@@ -85,7 +85,7 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"this token expired. Tokens last {settings.jwt_expiry_minutes} minutes; mint a new one with POST /auth/token.",
             headers=CHALLENGE,
-        )
+        ) from None
     except jwt.InvalidTokenError as exc:
         hint = DECODE_HINTS.get(str(exc), GENERIC_DECODE_HINT)
 
@@ -93,7 +93,7 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"this token could not be verified ({exc}): {hint}",
             headers=CHALLENGE,
-        )
+        ) from exc
 
 
 def current_principal(
@@ -103,8 +103,10 @@ def current_principal(
 
     try:
         role = Role(claims["role"])
-    except (KeyError, ValueError):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="role claim missing or unknown")
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="role claim missing or unknown"
+        ) from exc
 
     return Principal(
         user_id=claims["sub"],

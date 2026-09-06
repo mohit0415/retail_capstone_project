@@ -1,7 +1,6 @@
 import logging
 import shutil
 from pathlib import Path
-from typing import List
 
 from llama_index.core.schema import TextNode
 
@@ -35,10 +34,10 @@ class ImageProcessor:
 
         return str(permanent)
 
-    def process(self, images: List[RawImage], document_metadata: dict) -> List[TextNode]:
+    def process(self, images: list[RawImage], document_metadata: dict) -> list[TextNode]:
         source_stem = Path(document_metadata.get("original_file_name", "document")).stem.replace(" ", "_")
 
-        nodes: List[TextNode] = []
+        nodes: list[TextNode] = []
 
         for image in images:
             try:

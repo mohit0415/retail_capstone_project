@@ -7,10 +7,11 @@ from configs.llms import model_for
 from src.graph.state import AgentState
 from src.nodes.nl2sql_path import run_sql_evidence
 from src.nodes.rag_path import gather_policy_evidence
-from src.retrieval.adapter import format_context as build_context
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.library import HYBRID_ANSWER
+from src.retrieval.adapter import format_context as build_context
 from src.schemas.models import DraftAnswer
+from src.sqlpath.executor import sanity_check
 
 
 @traced_node("hybrid_path")
@@ -24,12 +25,15 @@ def hybrid_path_node(state: AgentState) -> dict:
 
     rows = json.dumps(evidence.rows[:25], default=str, indent=2) if evidence else f"(no rows: {failure})"
 
+    caveats = sanity_check(evidence) if evidence else [f"the database probe did not run: {failure}"]
+
     prompt = HYBRID_ANSWER.format(
         query=state["standalone_query"],
         context=build_context(chunks),
         as_of=evidence.as_of if evidence else "n/a",
         row_count=evidence.row_count if evidence else 0,
         rows=rows,
+        caveats="\n".join(f"- {item}" for item in caveats) or "- none",
     )
 
     model = model_for("hybrid_generate").with_structured_output(DraftAnswer)
