@@ -20,7 +20,8 @@ def _plan(path: EvidencePath) -> EvidencePlan:
 def _state(intent: Intent) -> dict:
     return {
         "request_id": "req-42",
-        "standalone_query": "which vendors are non compliant",
+        # two status filters: no single vetted query answers it, so the planner model is asked
+        "standalone_query": "which vendors are non compliant and still approved",
         "access_scopes": SCOPES,
         "risk": RiskAssessment(final_level=RiskLevel.LOW),
         "intent": IntentResult(intent=intent),
@@ -52,11 +53,11 @@ def test_a_clamped_route_is_logged_with_both_paths_and_the_reason(planner_return
     planner_returns(_plan(EvidencePath.RAG))
 
     with caplog.at_level("INFO", logger="src.nodes.planner"):
-        planner_module.planner_node(_state(Intent.RECORD_LOOKUP))
+        planner_module.planner_node(_state(Intent.VENDOR_STATUS))
 
     line = next(record.getMessage() for record in caplog.records if "route intent=" in record.getMessage())
 
-    assert "intent=record_lookup" in line
+    assert "intent=vendor_status" in line
     assert "proposed=rag" in line
     assert "chosen=nl2sql" in line
     assert "clamped=True" in line

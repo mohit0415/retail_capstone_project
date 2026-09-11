@@ -4,6 +4,7 @@ import pytest
 
 from src.graph.path_policy import (
     ESCALATE,
+    NO_ACCESS,
     allowed_path_names,
     degrade_for_budget,
     resolve_path,
@@ -43,7 +44,7 @@ DEFAULTS = [
     (Intent.VENDOR_STATUS, EvidencePath.NL2SQL),
     (Intent.RETENTION_QUERY, EvidencePath.HYBRID),
     (Intent.COMPLIANCE_CHECK, EvidencePath.HYBRID),
-    (Intent.INCIDENT_GUIDANCE, EvidencePath.AGENTIC),
+    (Intent.INCIDENT_GUIDANCE, EvidencePath.HYBRID),
 ]
 
 
@@ -87,10 +88,18 @@ def test_a_policy_question_can_never_be_answered_from_records():
 
 
 def test_a_choice_inside_the_allowed_set_survives():
-    decision = _resolve(Intent.COMPLIANCE_CHECK, proposed=EvidencePath.AGENTIC)
+    decision = _resolve(Intent.INCIDENT_GUIDANCE, proposed=EvidencePath.RAG)
 
-    assert decision.path == EvidencePath.AGENTIC.value
+    assert decision.path == EvidencePath.RAG.value
     assert not decision.clamped
+
+
+@pytest.mark.parametrize("intent", [*Intent])
+def test_no_intent_admits_the_agentic_route_the_v4_workflow_does_not_have(intent):
+    decision = _resolve(intent, proposed=EvidencePath.AGENTIC)
+
+    assert decision.path != EvidencePath.AGENTIC.value
+    assert decision.clamped
 
 
 def test_high_risk_beats_every_other_consideration():
@@ -105,11 +114,18 @@ def test_high_risk_beats_every_other_consideration():
     assert decision.path == EvidencePath.HIGH_RISK_PANEL.value
 
 
-def test_a_record_question_escalates_when_the_role_reads_no_table():
+def test_a_record_question_is_answered_honestly_when_the_role_reads_no_table():
     decision = _resolve(Intent.RECORD_LOOKUP, proposed=EvidencePath.NL2SQL, has_tables=False)
 
-    assert decision.path == ESCALATE
+    assert decision.path == NO_ACCESS
     assert "no table" in decision.reason
+
+
+def test_a_policy_question_is_answered_honestly_when_the_role_reads_no_document():
+    decision = _resolve(Intent.POLICY_LOOKUP, proposed=EvidencePath.RAG, has_documents=False)
+
+    assert decision.path == NO_ACCESS
+    assert "no document" in decision.reason
 
 
 def test_a_two_sided_question_falls_back_to_policy_and_flags_partial_evidence():
@@ -190,6 +206,16 @@ def test_the_router_escalates_when_the_planner_could_not_place_the_question():
     assert route_evidence_path(state) == "escalate"
 
 
+def test_the_router_answers_honestly_when_the_role_cannot_read_the_source():
+    assert route_evidence_path(_state(routed_path=NO_ACCESS)) == "not_found"
+
+
+def test_the_router_still_escalates_a_no_access_question_when_a_human_was_asked_for():
+    state = _state(routed_path=NO_ACCESS, raw_query="which vendors are overdue? escalate this to legal review")
+
+    assert route_evidence_path(state) == "escalate"
+
+
 def test_the_router_falls_back_to_the_plan_when_no_decision_was_recorded():
     plan = EvidencePlan(
         path=EvidencePath.HYBRID,
@@ -209,7 +235,8 @@ def test_high_risk_reaches_the_panel_through_the_router_too():
 
 
 def test_the_allowed_set_is_reported_for_the_planner_prompt():
-    assert allowed_path_names(Intent.COMPLIANCE_CHECK) == ["agentic", "hybrid"]
+    assert allowed_path_names(Intent.COMPLIANCE_CHECK) == ["hybrid"]
+    assert allowed_path_names(Intent.INCIDENT_GUIDANCE) == ["hybrid", "rag"]
     assert allowed_path_names(Intent.POLICY_LOOKUP) == ["rag"]
 
 

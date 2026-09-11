@@ -131,15 +131,54 @@ def _answer_state(chunk, plan):
 def test_a_strong_cross_encoder_score_carries_the_answer_through():
     breakdown = confidence_node(_answer_state(_chunk(0.86), _policy_plan()))["confidence"]
 
-    assert breakdown.retrieval_score == 0.86
+    assert breakdown.retrieval_score == 1.0
     assert breakdown.final_score >= 0.75
 
 
-def test_a_weak_cross_encoder_score_escalates():
+def test_a_no_match_cross_encoder_score_escalates():
+    # 0.02 is under the no-match ceiling: the documents do not answer this, however well cited
     breakdown = confidence_node(_answer_state(_chunk(0.02), _policy_plan()))["confidence"]
 
-    assert breakdown.retrieval_score == 0.02
+    assert breakdown.retrieval_score == 0.0
     assert breakdown.final_score < 0.75
+
+
+def test_a_lukewarm_reranker_score_does_not_sink_a_cited_validated_answer():
+    # the log: "tell me about vendor risk classification framework" passed validation on the
+    # rewrite and then escalated on confidence 0.6998 because the reranker gave the best
+    # extract 0.18 - the raw cross-encoder score was 30% of the release gate
+    breakdown = confidence_node(_answer_state(_chunk(0.18), _policy_plan()))["confidence"]
+
+    assert 0.6 < breakdown.retrieval_score < 1.0
+    assert breakdown.final_score >= 0.75
+
+
+def test_a_lukewarm_score_with_an_uncited_answer_still_escalates():
+    state = _answer_state(_chunk(0.18), _policy_plan())
+    state["draft"] = DraftAnswer(answer="Records are kept for seven financial years, according to the policy.")
+
+    breakdown = confidence_node(state)["confidence"]
+
+    assert breakdown.retrieval_score < 0.2
+    assert breakdown.final_score < 0.75
+
+
+def test_a_validator_coverage_gap_lowers_coverage():
+    from src.schemas.enums import DefectType
+    from src.schemas.models import Defect
+
+    # a plan written without the planner model carries no claim list, so the validator's
+    # coverage judgement is the coverage signal
+    state = _answer_state(_chunk(0.86), None)
+    state["validation"] = ValidationReport(
+        passed=True,
+        defects=[Defect(defect_type=DefectType.COVERAGE_GAP, description="the second half of the question is unanswered")],
+    )
+
+    breakdown = confidence_node(state)["confidence"]
+
+    assert breakdown.coverage == 0.75
+    assert confidence_node(_answer_state(_chunk(0.86), None))["confidence"].coverage == 1.0
 
 
 def test_a_document_only_plan_is_not_penalised_for_having_no_records():

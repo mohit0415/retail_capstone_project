@@ -1,9 +1,14 @@
+import logging
+import re
+
 from configs.database import read_only_connection
 from src.auth.rbac import allowed_tables
 from src.graph.state import AgentState
 from src.observability.tracing import traced_node
 from src.schemas.enums import EntityStatus, TerminalOutcome
 from src.schemas.models import ResolvedEntity
+
+logger = logging.getLogger(__name__)
 
 EXACT_VENDOR = """
 SELECT vendor_id, vendor_name, risk_category, compliance_status
@@ -57,6 +62,113 @@ GENERIC_ENTITY_SURFACES = {
     "stores",
     "all stores",
 }
+
+ATTRIBUTE_VALUES = {
+    "low",
+    "medium",
+    "high",
+    "critical",
+    "low risk",
+    "medium risk",
+    "high risk",
+    "critical risk",
+    "compliant",
+    "non-compliant",
+    "noncompliant",
+    "under review",
+    "pending",
+    "approved",
+    "rejected",
+}
+
+GENERIC_NOUNS = (
+    "third parties",
+    "third party",
+    "vendors",
+    "vendor",
+    "suppliers",
+    "supplier",
+    "departments",
+    "department",
+    "stores",
+    "store",
+)
+
+DETERMINERS = ("all ", "any ", "each ", "every ", "the ", "our ", "these ", "those ")
+
+# "vendors with open findings", "vendors overdue for review": a description, not a name
+DESCRIPTION_WORDS = frozenset(
+    {
+        "with", "without", "that", "who", "which", "whose", "whom", "under", "having", "marked", "flagged",
+        "in", "on", "overdue", "pending", "due", "awaiting", "rated", "not", "missing", "are", "is",
+        "requiring", "needing", "for",
+    }
+)
+
+# a state or kind of vendor ("overdue vendors", "third-party suppliers"), never a vendor's name
+MODIFIERS = frozenset(
+    {
+        "overdue", "expired", "suspended", "unapproved", "pending", "due", "awaiting", "rated", "missing",
+        "active", "inactive", "new", "existing", "flagged", "blocked", "terminated", "third party",
+        "external", "current", "former", "open", "closed", "risky", "risk",
+    }
+)
+
+
+def _normalise(text: str) -> str:
+    return re.sub(r"[\s\-]+", " ", (text or "").strip().lower())
+
+
+_GENERIC_SURFACES = {_normalise(surface) for surface in GENERIC_ENTITY_SURFACES}
+
+_ATTRIBUTE_SURFACES = {_normalise(value) for value in ATTRIBUTE_VALUES}
+
+
+def _is_attribute_phrase(prefix: str) -> bool:
+    """"high and critical risk", "overdue", "third party": every part is a band, a status or a state."""
+    parts = [part.strip() for part in re.split(r",| and | or | & ", prefix) if part.strip()]
+
+    if not parts:
+        return False
+
+    for part in parts:
+        if part in _ATTRIBUTE_SURFACES or part in MODIFIERS:
+            continue
+
+        if not all(word in _ATTRIBUTE_SURFACES or word in MODIFIERS for word in part.split()):
+            return False
+
+    return True
+
+
+def is_description(surface: str) -> bool:
+    """A category or a description of records ("high risk vendors", "vendors with open findings").
+
+    It is a filter for the records query, not the name of one vendor: looking it up as a name found
+    no vendor called "high risk vendors" and stopped the app's own suggested question with a
+    clarification.
+    """
+    text = _normalise(surface)
+
+    for determiner in DETERMINERS:
+        if text.startswith(determiner):
+            text = text[len(determiner):]
+            break
+
+    if text in _GENERIC_SURFACES or text in _ATTRIBUTE_SURFACES:
+        return True
+
+    for noun in GENERIC_NOUNS:
+        if text.endswith(f" {noun}") and _is_attribute_phrase(text[: -len(noun) - 1]):
+            return True
+
+        if noun.endswith("s") and text.startswith(f"{noun} "):
+            following = text[len(noun) + 1:].split()
+
+            if following and following[0] in DESCRIPTION_WORDS:
+                return True
+
+    return False
 
 
 def _resolve_vendor(surface: str) -> ResolvedEntity:
@@ -163,19 +275,40 @@ def entity_resolution_node(state: AgentState) -> dict:
     intent = state.get("intent")
 
     if intent is None:
+        logger.debug("entity resolution skipped: no intent request_id=%s", state.get("request_id"))
+
         return {"resolved_entities": []}
 
     tables = allowed_tables(state.get("access_scopes", []))
     resolved: list[ResolvedEntity] = []
+    skipped: list[str] = []
 
     for span in intent.entities:
-        if span.text.strip().lower() in GENERIC_ENTITY_SURFACES:
+        if is_description(span.text):
+            skipped.append(f"{span.entity_type}:{span.text} (generic/attribute)")
             continue
 
         if span.entity_type == "vendor" and "vendors" in tables:
             resolved.append(_resolve_vendor(span.text))
         elif span.entity_type == "department" and "retention_records" in tables:
             resolved.append(_resolve_department(span.text))
+        else:
+            skipped.append(f"{span.entity_type}:{span.text} (no table in scope)")
+
+    for entity in resolved:
+        logger.info(
+            "entity %s=%r status=%s resolved_id=%s canonical=%r candidates=%d request_id=%s",
+            entity.entity_type,
+            entity.surface_form,
+            entity.status.value,
+            entity.resolved_id,
+            entity.canonical_name,
+            len(entity.candidates),
+            state.get("request_id"),
+        )
+
+    if skipped:
+        logger.debug("entity spans not resolved: %s request_id=%s", skipped, state.get("request_id"))
 
     blocking = [
         entity
@@ -184,9 +317,18 @@ def entity_resolution_node(state: AgentState) -> dict:
     ]
 
     if blocking:
+        question = _clarification_for(blocking[0])
+
+        logger.warning(
+            "entity resolution needs clarification request_id=%s blocking=%s question=%r",
+            state.get("request_id"),
+            [f"{e.entity_type}:{e.surface_form}={e.status.value}" for e in blocking],
+            question,
+        )
+
         return {
             "resolved_entities": resolved,
-            "clarification_question": _clarification_for(blocking[0]),
+            "clarification_question": question,
             "terminal_outcome": TerminalOutcome.CLARIFICATION_REQUIRED.value,
         }
 

@@ -13,7 +13,8 @@ from src.index.models import get_llm
 from src.schemas.models import SqlEvidence
 from src.sqlpath.disclosure import caveats
 from src.sqlpath.nl2sql_engine import GeneratedSqlError, run_generated_sql
-from src.sqlpath.selector import TemplateSelectionError, select_template
+from src.sqlpath.scoping import ScopeError, scope_statement
+from src.sqlpath.selector import TemplateSelectionError, match_simple_template, select_template
 from src.sqlpath.templates import (
     TemplateBindingError,
     bind_parameters,
@@ -34,6 +35,7 @@ def _scope_rows(
     departments: list[str],
     risk_categories: set[str] | None,
 ) -> tuple[list[dict], int]:
+    """Second line of defence: the statement is already scoped (src/sqlpath/scoping.py)."""
     allowed_departments = {value.lower() for value in departments} if departments else None
     allowed_risk = {value.lower() for value in risk_categories} if risk_categories else None
 
@@ -83,11 +85,6 @@ def run_vetted_sql(
     if not ok:
         raise SqlPolicyError(reason)
 
-    ok, reason = classify_intent_with_llm(get_llm("sql_intent_guard"), question)
-
-    if not ok:
-        raise SqlPolicyError(reason)
-
     visible_tables = set(tables_visible_to(allowed_tables))
 
     if not visible_tables:
@@ -95,23 +92,47 @@ def run_vetted_sql(
 
     catalogue = templates_visible_to(allowed_tables)
 
-    try:
-        template, supplied = select_template(
-            question=question,
-            templates=catalogue,
-            allowed_tables=visible_tables,
-            entity_hints=entity_hints,
-            config=config,
+    matched = match_simple_template(question, catalogue, named_vendor=presets.get("vendor_id") is not None)
+
+    if matched is None:
+        # the matcher only accepts a vendor noun, one status value and filler words, so a
+        # paraphrased write request can never reach it; everything else gets the model check
+        ok, reason = classify_intent_with_llm(get_llm("sql_intent_guard"), question)
+
+        if not ok:
+            raise SqlPolicyError(reason)
+
+    if matched is not None:
+        template, supplied = matched
+        selection = "matched"
+
+        logger.info(
+            "vetted template matched without the selector model template=%s parameters=%s",
+            template.template_id,
+            supplied,
         )
-    except TemplateSelectionError as exc:
-        return _generated_fallback(
-            question=question,
-            reason=str(exc),
-            allowed_tables=allowed_tables,
-            departments=departments,
-            risk_categories=risk_categories,
-            as_of=as_of,
-        )
+    else:
+        try:
+            template, supplied = select_template(
+                question=question,
+                templates=catalogue,
+                allowed_tables=visible_tables,
+                entity_hints=entity_hints,
+                config=config,
+            )
+        except TemplateSelectionError as exc:
+            logger.debug("template selection failed (%s), using generated SQL fallback", exc)
+
+            return _generated_fallback(
+                question=question,
+                reason=str(exc),
+                allowed_tables=allowed_tables,
+                departments=departments,
+                risk_categories=risk_categories,
+                as_of=as_of,
+            )
+
+        selection = "selector"
 
     for name, value in presets.items():
         if any(parameter.name == name for parameter in template.parameters):
@@ -141,8 +162,13 @@ def run_vetted_sql(
         raise SqlPolicyError(f"the vetted query '{template.template_id}' is out of scope for this role")
 
     try:
+        scoped = scope_statement(statement, visible_tables, risk_categories, departments)
+    except ScopeError as exc:
+        raise SqlPolicyError(str(exc)) from exc
+
+    try:
         with read_only_connection() as conn:
-            raw_rows = conn.execute(statement, bound).fetchall()
+            raw_rows = conn.execute(scoped.statement, bound).fetchall()
     except Exception as exc:
         logger.error("vetted query %s failed: %s", template.template_id, exc)
 
@@ -154,13 +180,15 @@ def run_vetted_sql(
 
     return SqlEvidence(
         template_id=template.template_id,
-        statement=statement,
+        statement=scoped.statement,
         parameters=_reportable_parameters(bound),
         row_count=len(rows),
         rows=rows[: settings.sql_row_limit],
         as_of=as_of,
         truncated=len(raw_rows) >= settings.sql_row_limit,
         rows_filtered_by_scope=filtered_out,
+        scope_note=scoped.note,
+        selection=selection,
     )
 
 
@@ -178,7 +206,13 @@ def _generated_fallback(
     logger.info("no vetted template fits (%s); falling back to the generated NL2SQL engine", reason)
 
     try:
-        evidence = run_generated_sql(question=question, allowed_tables=allowed_tables, as_of=as_of)
+        evidence = run_generated_sql(
+            question=question,
+            allowed_tables=allowed_tables,
+            as_of=as_of,
+            risk_categories=risk_categories,
+            departments=departments,
+        )
     except GeneratedSqlError as exc:
         raise SqlPolicyError(
             f"no reviewed query answers this question ({reason}), and the generated query "
@@ -190,8 +224,9 @@ def _generated_fallback(
     return evidence.model_copy(
         update={
             "rows": kept,
-            "row_count": len(kept),
+            "row_count": evidence.row_count - filtered_out,
             "rows_filtered_by_scope": filtered_out,
+            "selection": "generated",
         }
     )
 

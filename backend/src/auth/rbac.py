@@ -1,7 +1,69 @@
 from src.schemas.enums import Role
 
+# ---------------------------------------------------------------------------
+# Auth0 role -> backend Role
+#
+# The role names you create in the Auth0 dashboard must be exactly the Role
+# values: store_associate, store_manager, compliance_officer, legal_reviewer,
+# admin. The Auth0 Action "add-roles-to-tokens" copies them into the access
+# token, and src/auth/security.py reads them from there.
+# ---------------------------------------------------------------------------
+
+# most privileged first - if a user carries several roles this order decides
+ROLE_PRIORITY = [
+    Role.ADMIN,
+    Role.LEGAL_REVIEWER,
+    Role.COMPLIANCE_OFFICER,
+    Role.STORE_MANAGER,
+    Role.STORE_ASSOCIATE,
+]
+
+# the plain "user" role from the practice-1 tenant still gets the read-only chat
+ROLE_ALIASES = {"user": Role.STORE_ASSOCIATE}
+
+
+def resolve_role(auth0_roles: list[str]) -> Role | None:
+    """Pick the backend Role for a list of Auth0 role names (None when nothing matches)."""
+    found: set[Role] = set()
+
+    for name in auth0_roles or []:
+        key = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+
+        if key in ROLE_ALIASES:
+            found.add(ROLE_ALIASES[key])
+            continue
+
+        try:
+            found.add(Role(key))
+        except ValueError:
+            continue
+
+    for role in ROLE_PRIORITY:
+        if role in found:
+            return role
+
+    return None
+
+
+# which frontend screens each role gets (Miro board "Role to screen routing")
+SCREENS = {
+    Role.STORE_ASSOCIATE: ["chat"],
+    Role.STORE_MANAGER: ["chat", "dashboard"],
+    Role.COMPLIANCE_OFFICER: ["chat", "dashboard", "review", "slo"],
+    Role.LEGAL_REVIEWER: ["chat", "review", "slo"],
+    Role.ADMIN: ["chat", "dashboard", "review", "slo", "corpus"],
+}
+
+
+def screens_for(role: Role) -> list[str]:
+    return list(SCREENS[role])
+
+
 DOCUMENT_SCOPES = {
-    Role.STORE_ASSOCIATE: {"privacy_policy", "infosec_policy", "anti_bribery_policy"},
+    # the retention policy is plain policy text (how long each record type is kept), and
+    # the chat suggests "What is the retention period for customer transaction records?"
+    # to associates - without this grant that question could only ever escalate
+    Role.STORE_ASSOCIATE: {"privacy_policy", "infosec_policy", "anti_bribery_policy", "retention_policy"},
     Role.STORE_MANAGER: {
         "privacy_policy",
         "infosec_policy",
@@ -64,6 +126,8 @@ REVIEWER_ROLES = {Role.COMPLIANCE_OFFICER, Role.LEGAL_REVIEWER, Role.ADMIN}
 
 CORPUS_ADMIN_ROLES = {Role.ADMIN}
 
+DASHBOARD_ROLES = {Role.STORE_MANAGER, Role.COMPLIANCE_OFFICER, Role.ADMIN}
+
 
 def access_scopes_for(role: Role) -> list[str]:
     docs = sorted(f"doc:{name}" for name in DOCUMENT_SCOPES[role])
@@ -95,3 +159,18 @@ def can_review(role: Role) -> bool:
 
 def can_ingest(role: Role) -> bool:
     return role in CORPUS_ADMIN_ROLES
+
+
+def can_view_dashboard(role: Role) -> bool:
+    return role in DASHBOARD_ROLES
+
+
+def permissions_for(role: Role) -> dict[str, bool]:
+    """Flags the frontend uses to show / hide screens (the backend still enforces them)."""
+    return {
+        "can_chat": True,
+        "can_view_dashboard": can_view_dashboard(role),
+        "can_review": can_review(role),
+        "can_view_slo": can_review(role),
+        "can_ingest": can_ingest(role),
+    }

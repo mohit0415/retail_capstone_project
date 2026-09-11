@@ -47,6 +47,14 @@ CLOCK_READ = re.compile(
     re.I,
 )
 
+# functions that run SQL written inside a string, read files or change settings: the SQL in the
+# string never passes the table check ("SELECT query_to_xml('select * from audit_logs', ...)")
+FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(?:query_to_xml\w*|cursor_to_xml\w*|table_to_xml\w*|schema_to_xml\w*|database_to_xml\w*|"
+    r"dblink\w*|pg_\w+|lo_\w+|set_config|current_setting|xpath\w*)\s*\(",
+    re.I,
+)
+
 BLOCKED_INTENTS = {
     "INSERT",
     "UPDATE",
@@ -144,6 +152,9 @@ def validate_generated_sql(statement: str) -> tuple[bool, str]:
     if STACKED_STATEMENT.search(normalised.rstrip(";")):
         return False, "generated SQL contains a stacked statement, comment or UNION injection"
 
+    if FORBIDDEN_FUNCTIONS.search(normalised):
+        return False, "generated SQL calls a function that can run other SQL, read files or change settings"
+
     if CLOCK_READ.search(normalised):
         return False, (
             "generated SQL reads the wall clock; every probe must compare against the pinned "
@@ -153,10 +164,181 @@ def validate_generated_sql(statement: str) -> tuple[bool, str]:
     return True, ""
 
 
-def assert_tables_in_scope(statement: str, allowed_tables: set[str]) -> tuple[bool, str]:
-    referenced = set(re.findall(r"\b(?:FROM|JOIN)\s+\"?([a-z_][a-z0-9_]*)\"?", statement, re.I))
+STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 
-    out_of_scope = {table.lower() for table in referenced} - {table.lower() for table in allowed_tables}
+# "EXTRACT(YEAR FROM onboarding_date)" and "a IS DISTINCT FROM b" carry a FROM that is not a
+# table reference; without this the column after it was read as a table and the query refused
+FROM_INSIDE_FUNCTION = re.compile(r"\b(EXTRACT|SUBSTRING|TRIM|OVERLAY)\s*\(([^()]*?)\bFROM\b", re.I)
+
+DISTINCT_FROM = re.compile(r"\bDISTINCT\s+FROM\b", re.I)
+
+SQL_TOKEN = re.compile(r'"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*|[(),.]|\S')
+
+FROM_LIST_STOP_WORDS = frozenset(
+    {
+        "WHERE", "GROUP", "ORDER", "LIMIT", "HAVING", "UNION", "INTERSECT", "EXCEPT", "ON", "USING",
+        "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "OUTER", "WINDOW", "OFFSET",
+        "FETCH", "FOR", "RETURNING", "SELECT", "FROM", "AS", "LATERAL", "TABLESAMPLE",
+    }
+)
+
+
+def _is_identifier(token: str) -> bool:
+    return bool(token) and (token[0].isalpha() or token[0] in '_"')
+
+
+def _unquote(token: str) -> str:
+    if token.startswith('"') and token.endswith('"'):
+        return token[1:-1].replace('""', '"')
+
+    return token
+
+
+def _tokens(statement: str) -> list[str]:
+    text = STRING_LITERAL.sub("''", statement or "")
+    previous = None
+
+    while previous != text:
+        previous = text
+        text = FROM_INSIDE_FUNCTION.sub(lambda match: f"{match.group(1)}({match.group(2)} _from_", text)
+
+    text = DISTINCT_FROM.sub("DISTINCT _from_", text)
+
+    return SQL_TOKEN.findall(text)
+
+
+def referenced_tables(statement: str) -> set[str]:
+    """Every relation a statement reads, including the ones after a comma in a FROM list.
+
+    The old check only looked at the name straight after FROM or JOIN, so
+    "FROM vendors v, audit_logs a" read audit_logs without the scope check seeing it.
+    A schema-qualified name keeps its schema ("public.vendors"), and a function in the
+    FROM list is reported as "name()", so neither can pass as a granted table.
+    """
+    return _scan_relations(_tokens(statement))
+
+
+def _scan_relations(tokens: list[str]) -> set[str]:
+    found: set[str] = set()
+    index = 0
+
+    while index < len(tokens):
+        if tokens[index].upper() not in ("FROM", "JOIN"):
+            index += 1
+            continue
+
+        index += 1
+
+        while index < len(tokens):
+            if tokens[index].upper() in ("LATERAL", "ONLY"):
+                index += 1
+                continue
+
+            if tokens[index] == "(":
+                # a subquery in the FROM list: read what it references, then carry on with
+                # the list after it ("FROM (SELECT ...) sub, retention_records r")
+                end = _skip_parentheses(tokens, index)
+                found |= _scan_relations(tokens[index + 1 : end - 1])
+                index = end
+            elif _is_identifier(tokens[index]):
+                name = _unquote(tokens[index])
+                index += 1
+
+                while index + 1 < len(tokens) and tokens[index] == "." and _is_identifier(tokens[index + 1]):
+                    name = f"{name}.{_unquote(tokens[index + 1])}"
+                    index += 2
+
+                if index < len(tokens) and tokens[index] == "(":
+                    found.add(f"{name.lower()}()")
+                    break
+
+                found.add(name.lower())
+            else:
+                break
+
+            if index < len(tokens) and tokens[index].upper() == "AS":
+                index += 1
+
+            if (
+                index < len(tokens)
+                and _is_identifier(tokens[index])
+                and tokens[index].upper() not in FROM_LIST_STOP_WORDS
+            ):
+                index += 1
+
+            if index < len(tokens) and tokens[index] == ",":
+                index += 1
+                continue
+
+            break
+
+    return found
+
+
+def defined_cte_names(statement: str) -> set[str]:
+    """The names a leading WITH clause defines (they are not tables, so they need no grant)."""
+    tokens = _tokens(statement)
+
+    if not tokens or tokens[0].upper() != "WITH":
+        return set()
+
+    names: set[str] = set()
+    index = 1
+
+    if index < len(tokens) and tokens[index].upper() == "RECURSIVE":
+        index += 1
+
+    while index < len(tokens) and _is_identifier(tokens[index]):
+        name = _unquote(tokens[index]).lower()
+        index += 1
+
+        if index < len(tokens) and tokens[index] == "(":
+            index = _skip_parentheses(tokens, index)
+
+        if index >= len(tokens) or tokens[index].upper() != "AS":
+            break
+
+        index += 1
+
+        while index < len(tokens) and tokens[index].upper() in ("NOT", "MATERIALIZED"):
+            index += 1
+
+        if index >= len(tokens) or tokens[index] != "(":
+            break
+
+        names.add(name)
+        index = _skip_parentheses(tokens, index)
+
+        if index < len(tokens) and tokens[index] == ",":
+            index += 1
+            continue
+
+        break
+
+    return names
+
+
+def _skip_parentheses(tokens: list[str], index: int) -> int:
+    depth = 0
+
+    while index < len(tokens):
+        if tokens[index] == "(":
+            depth += 1
+        elif tokens[index] == ")":
+            depth -= 1
+
+            if depth == 0:
+                return index + 1
+
+        index += 1
+
+    return index
+
+
+def assert_tables_in_scope(statement: str, allowed_tables: set[str]) -> tuple[bool, str]:
+    allowed = {table.lower() for table in allowed_tables} | defined_cte_names(statement)
+
+    out_of_scope = {name for name in referenced_tables(statement) if name not in allowed}
 
     if out_of_scope:
         return False, f"generated SQL touches out-of-scope tables: {sorted(out_of_scope)}"

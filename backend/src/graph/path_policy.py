@@ -8,6 +8,10 @@ BOTH = "both"
 
 ESCALATE = "escalate"
 
+# the only source that could answer the question is outside the role's grant: the reply says so
+# plainly (src/nodes/no_answer.py) - a human cannot hand this role data it may not read
+NO_ACCESS = "no_access"
+
 
 @dataclass(frozen=True)
 class PathRule:
@@ -58,20 +62,23 @@ RETENTION_QUERY = PathRule(
     rationale="a retention period is written in policy and the review cycle is stored in a record",
 )
 
+# The v4 workflow has four evidence routes - rag, nl2sql, hybrid and the high-risk panel - and no
+# agentic one, so no intent admits agentic: a planner that proposes it is clamped to the default.
+
 COMPLIANCE_CHECK = PathRule(
     default=EvidencePath.HYBRID,
-    allowed=frozenset({EvidencePath.HYBRID, EvidencePath.AGENTIC}),
+    allowed=frozenset({EvidencePath.HYBRID}),
     fallback=EvidencePath.HYBRID,
     evidence=BOTH,
     rationale="the question is exactly a rule checked against a record, so both sources are load bearing",
 )
 
 INCIDENT_GUIDANCE = PathRule(
-    default=EvidencePath.AGENTIC,
-    allowed=frozenset({EvidencePath.AGENTIC, EvidencePath.HYBRID}),
-    fallback=EvidencePath.HYBRID,
+    default=EvidencePath.HYBRID,
+    allowed=frozenset({EvidencePath.RAG, EvidencePath.HYBRID}),
+    fallback=EvidencePath.RAG,
     evidence=BOTH,
-    rationale="what to look up next depends on what the first lookup returns, which is the only case agentic earns",
+    rationale="what to do is written in policy; a record only sharpens it when the incident names one",
 )
 
 RULES: dict[Intent, PathRule] = {
@@ -194,7 +201,7 @@ def _apply_capability_gates(
     if path in NEEDS_RECORDS and not has_tables:
         if rule.evidence == RECORDS:
             return PathDecision(
-                path=ESCALATE,
+                path=NO_ACCESS,
                 reason="this question can only be answered from records and the role is granted no table",
                 clamped=True,
             )
@@ -209,7 +216,7 @@ def _apply_capability_gates(
     if path in NEEDS_DOCUMENTS and not has_documents:
         if rule.evidence == POLICY:
             return PathDecision(
-                path=ESCALATE,
+                path=NO_ACCESS,
                 reason="this question can only be answered from policy text and the role is granted no document",
                 clamped=True,
             )

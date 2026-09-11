@@ -25,6 +25,7 @@ STAGE_OF_NODE = {
     "escalation_manager": "t4",
     "safe_refusal": "t4",
     "clarification": "t4",
+    "no_answer": "t4",
 }
 
 STAGE_ORDER = ["t1", "t2", "t3", "t4"]

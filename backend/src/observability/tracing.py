@@ -3,36 +3,51 @@ import logging
 import time
 from collections.abc import Callable
 
-from configs.settings import settings
 from src.core.audit import audit_from_state
-from src.core.budget import guard_from_state
+from src.core.budget import finishing_grace_seconds, guard_from_state
+from src.observability.agent_steps import describe_step
+from src.observability.callbacks import LoggingCallbackHandler
+from src.observability.langfuse_callback import get_langfuse_manager
 from src.observability.slo import stage_for
 
 logger = logging.getLogger(__name__)
 
-_langfuse_handler = None
+_logging_handler = LoggingCallbackHandler()
+
+
+def _init_langfuse():
+    """Return the process-wide Langfuse CallbackHandler, or ``None``.
+
+    The client/handler lifecycle now lives in
+    :mod:`src.observability.langfuse_callback` (``LangfuseCallbackManager``);
+    this keeps the old entry point so node-level ``runnable_config`` calls and
+    the graph-level ``setup_langfuse_callback`` share one handler instance -
+    LangChain de-duplicates identical handler objects, so a request renders as
+    a single trace tree.
+    """
+    return get_langfuse_manager().get_callback_handler()
 
 
 def get_callback_handlers() -> list:
-    global _langfuse_handler
+    """Callbacks attached to every LLM call and to the graph run.
 
-    if not settings.tracing_enabled or not settings.langfuse_public_key:
-        return []
+    Always includes the logging handler, so model calls are observable in the
+    application log; adds the Langfuse handler on top when tracing is
+    configured.
+    """
+    handlers: list = [_logging_handler]
 
-    if _langfuse_handler is None:
-        try:
-            from langfuse.callback import CallbackHandler
+    langfuse_handler = _init_langfuse()
 
-            _langfuse_handler = CallbackHandler(
-                public_key=settings.langfuse_public_key,
-                secret_key=settings.langfuse_secret_key,
-                host=settings.langfuse_host,
-            )
-        except Exception as exc:
-            logger.warning("langfuse handler unavailable, continuing untraced: %s", exc)
-            return []
+    if langfuse_handler is not None:
+        handlers.append(langfuse_handler)
 
-    return [_langfuse_handler]
+    return handlers
+
+
+def flush_tracing() -> None:
+    """Flush buffered spans to Langfuse. Call on application shutdown."""
+    get_langfuse_manager().flush()
 
 
 def runnable_config(state: dict, node_name: str) -> dict:
@@ -54,7 +69,14 @@ def _elapsed_since_start(state: dict, fallback_started: float) -> float:
     return round((time.monotonic() - started) * 1000, 2)
 
 
-def _span(node_name: str, state: dict, elapsed_ms: float, since_start_ms: float, status: str) -> dict:
+def _span(
+    node_name: str,
+    state: dict,
+    elapsed_ms: float,
+    since_start_ms: float,
+    status: str,
+    result: dict | None = None,
+) -> dict:
     span = {
         "node": node_name,
         "stage": stage_for(node_name),
@@ -63,6 +85,9 @@ def _span(node_name: str, state: dict, elapsed_ms: float, since_start_ms: float,
         "since_start_ms": since_start_ms,
         "request_id": state.get("request_id"),
     }
+
+    # readable agent name, one-line summary and model tier for the workflow view
+    span.update(describe_step(node_name, state, result, status))
 
     decision = state.get("path_decision")
 
@@ -88,7 +113,17 @@ def traced_node(node_name: str) -> Callable:
         def wrapper(state: dict) -> dict:
             started = time.monotonic()
             guard = guard_from_state(state)
-            verdict = guard.check(node_name)
+            grace = finishing_grace_seconds(node_name, state)
+            verdict = guard.check(node_name, grace_seconds=grace)
+
+            if verdict.allowed and grace and guard.seconds_remaining <= 0:
+                logger.info(
+                    "node=%s started %.1fs after the deadline inside its %.0fs grace window request_id=%s",
+                    node_name,
+                    -guard.seconds_remaining,
+                    grace,
+                    state.get("request_id"),
+                )
 
             if not verdict.allowed:
                 since_start = _elapsed_since_start(state, started)
@@ -104,9 +139,9 @@ def traced_node(node_name: str) -> Callable:
                     "escalation_reason": f"the {node_name} step was stopped by the budget guard ({verdict.reason})",
                     "budget_stops": [stop],
                     "degraded": True,
-                    "trace": [_span(node_name, state, 0.0, since_start, "budget_stopped")],
                     "marks": [_mark(node_name, since_start)],
                 }
+                result["trace"] = [_span(node_name, state, 0.0, since_start, "budget_stopped", result)]
 
                 logger.warning(
                     "node=%s budget_stopped reason=%s request_id=%s",
@@ -138,7 +173,7 @@ def traced_node(node_name: str) -> Callable:
 
             result["trace"] = [
                 *result.get("trace", []),
-                _span(node_name, {**state, **result}, elapsed_ms, since_start, "completed"),
+                _span(node_name, {**state, **result}, elapsed_ms, since_start, "completed", result),
             ]
             result["marks"] = [*result.get("marks", []), _mark(node_name, since_start)]
 

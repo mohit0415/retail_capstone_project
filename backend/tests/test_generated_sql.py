@@ -38,9 +38,6 @@ def _evidence(**overrides) -> SqlEvidence:
     return SqlEvidence(**payload)
 
 
-# ---------- what comes back from the model ----------
-
-
 def test_a_fenced_statement_is_unwrapped():
     assert _strip("```sql\nSELECT 1 FROM vendors;\n```") == "SELECT 1 FROM vendors"
 
@@ -51,9 +48,6 @@ def test_a_labelled_statement_is_unwrapped():
 
 def test_a_bare_statement_survives_untouched():
     assert _strip("SELECT 1 FROM vendors") == "SELECT 1 FROM vendors"
-
-
-# ---------- the gates ----------
 
 
 def test_a_clean_select_passes_every_gate():
@@ -94,9 +88,6 @@ def test_an_unbound_placeholder_is_rejected_rather_than_run():
 
     with pytest.raises(GeneratedSqlError, match="placeholder"):
         _gate(statement, OFFICER_TABLES)
-
-
-# ---------- the two-tier handover ----------
 
 
 def _install(monkeypatch, *, refuses: bool, generated=None, raises=None):
@@ -196,9 +187,6 @@ def test_a_role_with_no_table_never_reaches_the_generator(monkeypatch):
 def test_the_engine_refuses_a_role_with_no_table():
     with pytest.raises(GeneratedSqlError, match="not scoped"):
         nl2sql_engine.run_generated_sql(question="anything", allowed_tables=set())
-
-
-# ---------- what the answer has to say about it ----------
 
 
 def test_a_generated_result_must_be_disclosed():

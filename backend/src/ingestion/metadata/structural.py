@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -9,6 +10,8 @@ from src.ingestion.metadata.schema import (
     DOMAIN,
     LEVEL_DOCUMENT,
 )
+
+logger = logging.getLogger(__name__)
 
 FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.S)
 
@@ -77,6 +80,8 @@ def resolve_effective_date(frontmatter: dict) -> str:
     try:
         return date.fromisoformat(declared).isoformat()
     except ValueError:
+        logger.debug("invalid effective_date %r in frontmatter, using default", declared)
+
         return DEFAULT_EFFECTIVE_DATE.isoformat()
 
 

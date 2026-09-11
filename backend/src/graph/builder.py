@@ -7,24 +7,25 @@ from src.graph.routing import (
     after_confidence,
     after_entity_resolution,
     after_escalation,
-    after_evidence,
     after_guardrail,
     after_intent,
+    after_nl2sql_path,
     after_output_guardrail,
+    after_panel,
+    after_planner,
+    after_rag_path,
     after_risk,
     after_validation,
-    route_evidence_path,
 )
 from src.graph.state import AgentState
-from src.nodes.agentic_rag import agentic_rag_node
 from src.nodes.confidence import confidence_node
 from src.nodes.entity_resolution import entity_resolution_node
 from src.nodes.escalation import escalation_node
 from src.nodes.guardrail import input_guardrail_node
-from src.nodes.hybrid_path import hybrid_path_node
 from src.nodes.intent_classification import intent_classification_node
 from src.nodes.multi_agent_panel import multi_agent_panel_node
 from src.nodes.nl2sql_path import nl2sql_path_node
+from src.nodes.no_answer import no_answer_node
 from src.nodes.planner import planner_node
 from src.nodes.query_rewrite import query_rewrite_node
 from src.nodes.rag_path import rag_path_node
@@ -35,7 +36,9 @@ from src.nodes.validation import compliance_validation_node
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_NODES = ("rag_path", "nl2sql_path", "hybrid_path", "agentic_rag", "multi_agent_panel")
+# the evidence stages, in the order every route runs them: RAG first, then NL2SQL, then the
+# multi-agent panel, then compliance validation (src/graph/routing.py, evidence_stages)
+EVIDENCE_NODES = ("rag_path", "nl2sql_path", "multi_agent_panel")
 
 _checkpointer = None
 _compiled = None
@@ -49,10 +52,19 @@ def build_checkpointer():
 
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg import Connection
+        from psycopg.rows import dict_row
 
-        saver = PostgresSaver.from_conn_string(settings.database_url)
+        conn = Connection.connect(
+            settings.database_url,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        )
+        saver = PostgresSaver(conn)
         saver.setup()
         _checkpointer = saver
+        logger.info("postgres checkpointer ready")
     except Exception as exc:
         logger.warning("postgres checkpointer unavailable, using in-memory saver: %s", exc)
 
@@ -74,8 +86,6 @@ def build_graph() -> StateGraph:
     graph.add_node("planner", planner_node)
     graph.add_node("rag_path", rag_path_node)
     graph.add_node("nl2sql_path", nl2sql_path_node)
-    graph.add_node("hybrid_path", hybrid_path_node)
-    graph.add_node("agentic_rag", agentic_rag_node)
     graph.add_node("multi_agent_panel", multi_agent_panel_node)
     graph.add_node("compliance_validation", compliance_validation_node)
     graph.add_node("reflection", reflection_node)
@@ -84,6 +94,7 @@ def build_graph() -> StateGraph:
     graph.add_node("escalation_manager", escalation_node)
     graph.add_node("safe_refusal", refusal_node)
     graph.add_node("clarification", clarification_node)
+    graph.add_node("no_answer", no_answer_node)
 
     graph.add_edge(START, "input_guardrail")
 
@@ -113,25 +124,49 @@ def build_graph() -> StateGraph:
         {"escalate": "escalation_manager", "continue": "planner"},
     )
 
+    # the planner's route decides which stages run; the first one it needs comes next
     graph.add_conditional_edges(
         "planner",
-        route_evidence_path,
+        after_planner,
         {
-            "rag": "rag_path",
-            "nl2sql": "nl2sql_path",
-            "hybrid": "hybrid_path",
-            "agentic": "agentic_rag",
-            "high_risk_panel": "multi_agent_panel",
+            "rag_path": "rag_path",
+            "nl2sql_path": "nl2sql_path",
+            "multi_agent_panel": "multi_agent_panel",
+            "not_found": "no_answer",
             "escalate": "escalation_manager",
         },
     )
 
-    for path_node in EVIDENCE_NODES:
-        graph.add_conditional_edges(
-            path_node,
-            after_evidence,
-            {"escalate": "escalation_manager", "continue": "compliance_validation"},
-        )
+    graph.add_conditional_edges(
+        "rag_path",
+        after_rag_path,
+        {
+            "nl2sql_path": "nl2sql_path",
+            "multi_agent_panel": "multi_agent_panel",
+            "compliance_validation": "compliance_validation",
+            "not_found": "no_answer",
+            "escalate": "escalation_manager",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "nl2sql_path",
+        after_nl2sql_path,
+        {
+            "multi_agent_panel": "multi_agent_panel",
+            "compliance_validation": "compliance_validation",
+            "not_found": "no_answer",
+            "escalate": "escalation_manager",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "multi_agent_panel",
+        after_panel,
+        {"compliance_validation": "compliance_validation", "escalate": "escalation_manager"},
+    )
+
+    graph.add_edge("no_answer", "output_guardrail")
 
     graph.add_conditional_edges(
         "compliance_validation",
@@ -139,6 +174,7 @@ def build_graph() -> StateGraph:
         {
             "score": "confidence_scoring",
             "reflect": "reflection",
+            "not_found": "no_answer",
             "escalate": "escalation_manager",
         },
     )
@@ -173,9 +209,19 @@ def get_compiled_graph():
     global _compiled
 
     if _compiled is None:
-        _compiled = build_graph().compile(
-            checkpointer=build_checkpointer(),
+        graph = build_graph()
+        checkpointer = build_checkpointer()
+
+        _compiled = graph.compile(
+            checkpointer=checkpointer,
             interrupt_after=["escalation_manager"],
+        )
+
+        logger.info(
+            "policy graph compiled nodes=%d evidence_stages=%s checkpointer=%s interrupt_after=escalation_manager",
+            len(graph.nodes),
+            " -> ".join([*EVIDENCE_NODES, "compliance_validation"]),
+            type(checkpointer).__name__,
         )
 
     return _compiled

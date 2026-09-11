@@ -1,8 +1,11 @@
+import json
 import logging
+import time
 import types
 
 from llama_index.core import StorageContext, VectorStoreIndex
-from llama_index.core.schema import BaseNode
+from llama_index.core.schema import BaseNode, TextNode
+from llama_index.core.vector_stores.utils import metadata_dict_to_node
 from llama_index.vector_stores.postgres import PGVectorStore
 from sqlalchemy import create_engine, text
 
@@ -12,6 +15,8 @@ from src.index.models import active_embed_model_name, configure_llama_settings, 
 logger = logging.getLogger(__name__)
 
 _index: VectorStoreIndex | None = None
+
+_lexical_corpus: list[BaseNode] | None = None
 
 
 def _vector_table_name() -> str:
@@ -47,6 +52,28 @@ def _patch_docstore_missing_nodes(index: VectorStoreIndex) -> None:
     store.aget_nodes = types.MethodType(aget_nodes, store)
 
 
+# pgvector cannot build an HNSW index on a vector column wider than this
+PGVECTOR_HNSW_MAX_DIMENSIONS = 2000
+
+
+def hnsw_settings(dimensions: int) -> dict | None:
+    """HNSW index settings, or None when the embedding is too wide for one.
+
+    text-embedding-3-large has 3072 dimensions, so every store build tried CREATE INDEX, failed and
+    logged "Error creating HNSW index" - which reads like a broken retrieval. Without the index
+    pgvector runs an exact search, which is correct and quick for a corpus of a few hundred chunks.
+    """
+    if dimensions > PGVECTOR_HNSW_MAX_DIMENSIONS:
+        return None
+
+    return {
+        "hnsw_m": 16,
+        "hnsw_ef_construction": 64,
+        "hnsw_ef_search": 40,
+        "hnsw_dist_method": "vector_cosine_ops",
+    }
+
+
 def build_vector_store() -> PGVectorStore:
     url = settings.database_url
 
@@ -55,12 +82,7 @@ def build_vector_store() -> PGVectorStore:
         async_connection_string=url.replace("postgresql://", "postgresql+asyncpg://"),
         table_name=settings.vector_table_name,
         embed_dim=settings.embedding_dimensions,
-        hnsw_kwargs={
-            "hnsw_m": 16,
-            "hnsw_ef_construction": 64,
-            "hnsw_ef_search": 40,
-            "hnsw_dist_method": "vector_cosine_ops",
-        },
+        hnsw_kwargs=hnsw_settings(settings.embedding_dimensions),
     )
 
 
@@ -73,6 +95,8 @@ def table_has_rows() -> bool:
 
         return row is not None
     except Exception:
+        logger.debug("table_has_rows probe failed (table may not exist yet)", exc_info=True)
+
         return False
 
 
@@ -99,9 +123,74 @@ def load_or_create_index() -> VectorStoreIndex:
 
 
 def reset_index() -> None:
-    global _index
+    global _index, _lexical_corpus
 
     _index = None
+    _lexical_corpus = None
+
+
+def _row_to_node(node_id: str, body: str | None, metadata) -> BaseNode:
+    """Rebuild the node llama-index stored, so the BM25 leg carries the same metadata as the vector leg."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            metadata = {}
+
+    metadata = dict(metadata or {})
+
+    try:
+        node = metadata_dict_to_node(metadata, text=body or "")
+    except Exception:
+        plain = {k: v for k, v in metadata.items() if not k.startswith("_")}
+        node = TextNode(id_=node_id, text=body or "", metadata=plain)
+
+    if not node.node_id:
+        node.id_ = node_id
+
+    return node
+
+
+def load_lexical_corpus() -> list[BaseNode]:
+    """All nodes in the vector table, as in-memory nodes for the BM25 retriever.
+
+    ``VectorStoreIndex.from_vector_store`` leaves the in-memory docstore empty
+    (PGVectorStore keeps the text in Postgres), so after a restart the BM25 leg
+    had nothing to search and hybrid retrieval was silently vector-only. This
+    reads ``node_id, text, metadata_`` straight from the table instead. The
+    corpus is a few hundred clause-level nodes for this project, so holding it
+    in memory is cheap; it is reloaded after any ingest, rebuild or clear.
+    """
+    global _lexical_corpus
+
+    if _lexical_corpus is not None:
+        return _lexical_corpus
+
+    started = time.perf_counter()
+
+    try:
+        engine = create_engine(settings.database_url)
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(f'SELECT node_id, text, metadata_ FROM "{_vector_table_name()}"')
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("lexical corpus could not be read from %s: %s", _vector_table_name(), exc)
+
+        return []
+
+    nodes = [_row_to_node(row[0], row[1], row[2]) for row in rows]
+    _lexical_corpus = nodes
+
+    logger.info(
+        "lexical corpus loaded nodes=%d table=%s elapsed_ms=%.0f",
+        len(nodes),
+        _vector_table_name(),
+        (time.perf_counter() - started) * 1000,
+    )
+
+    return nodes
 
 
 def clear_vector_table() -> int:
@@ -123,8 +212,11 @@ def insert_nodes(nodes: list[BaseNode]) -> int:
     if not nodes:
         return 0
 
+    global _lexical_corpus
+
     index = load_or_create_index()
     index.insert_nodes(nodes)
+    _lexical_corpus = None
 
     return len(nodes)
 
@@ -149,7 +241,7 @@ def stored_embed_models() -> dict:
             else:
                 result["untagged"] = int(count)
     except Exception:
-        pass
+        logger.debug("stored_embed_models probe failed", exc_info=True)
 
     return result
 
@@ -235,6 +327,8 @@ def clause_number_exists(clause_number: str) -> bool:
 
         return row is not None
     except Exception:
+        logger.debug("clause_number_exists probe failed for %s", clause_number, exc_info=True)
+
         return False
 
 
@@ -245,14 +339,15 @@ def file_hash_exists(file_hash: str) -> bool:
         with engine.connect() as conn:
             row = conn.execute(
                 text(
-                    f'SELECT 1 FROM "{_vector_table_name()}" '
-                    f"WHERE metadata_->>'file_hash' = :value LIMIT 1"
+                    f"SELECT 1 FROM \"{_vector_table_name()}\" WHERE metadata_->>'file_hash' = :value LIMIT 1"
                 ),
                 {"value": file_hash},
             ).fetchone()
 
         return row is not None
     except Exception:
+        logger.debug("file_hash_exists probe failed", exc_info=True)
+
         return False
 
 

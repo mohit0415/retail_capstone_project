@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import re
 import secrets
 import smtplib
 from email.mime.text import MIMEText
@@ -10,20 +11,87 @@ from configs.settings import settings
 
 logger = logging.getLogger(__name__)
 
-EXPLICIT_HANDOFF_PHRASES = (
-    "human agent",
-    "human support",
-    "real person",
-    "speak to a human",
-    "talk to a human",
-    "speak with a human",
-    "talk to a person",
-    "escalate to a human",
-    "escalate this",
-    "compliance officer",
-    "legal review",
-    "talk to legal",
-    "contact support",
+# An explicit request for a human or for legal validation - the brief's own escalation trigger.
+#
+# The question is read one sentence at a time, lower-cased, with straight apostrophes and single
+# spaces, so no pattern can backtrack over a run of whitespace. A sentence that opens as a question
+# about the rules ("Do I need legal approval ...", "Should I escalate ...", "How do I contact
+# support ...") is a policy question, never a request. Any other sentence is a request when it asks
+# for a person: "talk to a human", "I need legal validation", "please contact support", "escalate
+# this", "can a human review this". A bare mention of the compliance officer, legal review or
+# support is not one - matching the noun held validated Low-risk answers for a reviewer.
+MAX_SCANNED_CHARS = 4000
+
+_SENTENCE_BREAK = re.compile(r"[.!?;\n]+")
+
+_FILLER = re.compile(r"^(?:(?:hi|hello|hey|ok|okay|thanks|thank you|also|and|so|then|now)\b[ ,]*)+")
+
+_DESCRIPTIVE_OPENER = re.compile(
+    r"^(?:do|does|did|should|shall|must|is|are|was|were|am|when|which|what|who|whom|whose|how|why|where"
+    r"|has|had|if|whether)\b"
+)
+
+_PERSON = (
+    r"(?:a |an |the |someone (?:in|from) |somebody (?:in|from) )?"
+    r"(?:human|person|real person|agent|reviewer|compliance officer|legal team|legal|lawyer|attorney"
+    r"|solicitor|support|someone)"
+)
+
+_LEGAL_ASK = r"(?:validation|sign-off|sign off|signoff|opinion|advice|counsel|approval|review|check|confirmation)"
+
+_REVIEWED = r"(?:validated|checked|reviewed|approved|confirmed|signed off)"
+
+_BY_PERSON = r"(?:a |an |the )?(?:human|legal team|legal|compliance officer|lawyer|reviewer)"
+
+_WANT = r"(?:i|we)(?: would|'d)? (?:want|need|like|require|request)"
+
+_LEAD = r"(?:^|\bplease |\b(?:can|could|would) you (?:please )?)"
+
+HANDOFF_REQUEST = re.compile(
+    "|".join(
+        (
+            rf"\b(?:talk|speak|chat) (?:to|with) {_PERSON}\b",
+            rf"\b(?:connect|transfer|put) me (?:with|to|through to) {_PERSON}\b",
+            r"^(?:please |kindly )?escalate\b",
+            r"\bplease escalate\b",
+            r"\bescalate (?:this|it|my (?:question|request|case|query|answer))\b",
+            r"\bescalate (?:this |it )?to (?:a |an |the )?(?:human|person|reviewer|compliance officer|compliance"
+            r"|legal team|legal|manager)\b",
+            r"\b(?:can|could|would|will) (?:you|someone) (?:please )?escalate\b",
+            rf"\b{_WANT} (?:to escalate|this escalated|it escalated|an escalation)\b",
+            r"^(?:please )?contact (?:support|legal|the legal team|a human|the compliance officer"
+            r"|a compliance officer|someone)\b",
+            r"\bplease contact (?:support|legal|the legal team|a human|the compliance officer|a compliance officer"
+            r"|someone)\b",
+            r"\b(?:can|could|would) you (?:please )?contact\b",
+            r"\b(?:i|we)(?: would|'d)? (?:want|need|like) to contact (?:support|legal|a human|the compliance officer"
+            r"|a compliance officer|someone)\b",
+            r"\bcontact (?:support|legal) for me\b",
+            rf"\b{_WANT} (?:a |an |some )?legal {_LEGAL_ASK}\b",
+            r"\b(?:i|we)(?: would|'d)? (?:want|need|like) (?:legal|the legal team|a lawyer|an attorney) to "
+            r"(?:validate|check|review|confirm|approve|look at|sign off)\b",
+            rf"\b(?:i|we)(?: would|'d)? (?:want|need|like) (?:this|it|that) {_REVIEWED} by {_BY_PERSON}\b",
+            r"\b(?:i|we)(?: would|'d)? like to have (?:the )?legal (?:team )?(?:check|review|validate|confirm|look at)\b",
+            rf"\blegal {_LEGAL_ASK},? please\b",
+            rf"(?:^|\bplease )(?:get|arrange|request|obtain) (?:a |an )?legal {_LEGAL_ASK}\b",
+            rf"\b(?:can|could|may) (?:i|we) (?:please )?(?:get|have|request|ask for) (?:a |an )?legal {_LEGAL_ASK}\b",
+            r"\b(?:can|could|would) (?:you|we|i) (?:please )?(?:have|get|ask) (?:the )?legal (?:team )?(?:to )?"
+            r"(?:check|review|validate|confirm|approve|look at|sign off)\b",
+            r"\b(?:can|could|would) (?:the )?legal (?:team )?(?:please )?(?:validate|check|review|confirm|approve"
+            r"|sign off(?: on)?) (?:this|it|that|my)\b",
+            r"(?:^|\bplease )(?:have|get|ask|loop in|involve) (?:the )?legal\b",
+            r"\b(?:validate|check|confirm|verify|review) (?:this|it|that) with (?:the )?legal\b",
+            r"\bsend (?:this|it) (?:to legal|for (?:a )?legal (?:review|validation|check|sign-off|sign off))\b",
+            rf"\b(?:this|it|my (?:answer|question|case|request)) (?:needs|requires) (?:a )?legal {_LEGAL_ASK}\b",
+            r"\b(?:can|could|would) (?:a human|someone|somebody|a person|a reviewer|a compliance officer"
+            r"|someone from legal|legal) (?:please )?(?:review|check|look at|confirm|validate) (?:this|it|that|my)\b",
+            rf"{_LEAD}(?:have|get|let) (?:a |an )?(?:human|person|reviewer|compliance officer|lawyer)\b",
+            rf"{_LEAD}(?:have|get) (?:this|it|that) {_REVIEWED} by {_BY_PERSON}\b",
+            rf"\b{_WANT} (?:a |an |to see a |to have a )?(?:human|real person|human reviewer|reviewer|lawyer"
+            r"|attorney|compliance officer|human review)\b",
+            r"(?:^|\bplease )ask (?:the |a )?(?:compliance officer|legal team|legal|lawyer|human) to\b",
+        )
+    )
 )
 
 
@@ -33,10 +101,29 @@ def generate_reference_id(now: datetime.datetime | None = None) -> str:
     return f"ESC-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
 
 
-def requested_human(question: str) -> bool:
-    lowered = (question or "").lower()
+def _sentences(question: str) -> list[str]:
+    text = (question or "")[:MAX_SCANNED_CHARS].replace(chr(0x2018), "'").replace(chr(0x2019), "'").lower()
+    sentences = []
 
-    return any(phrase in lowered for phrase in EXPLICIT_HANDOFF_PHRASES)
+    for raw in _SENTENCE_BREAK.split(text):
+        sentence = _FILLER.sub("", " ".join(raw.split())).strip(" ,:-")
+
+        if sentence:
+            sentences.append(sentence)
+
+    return sentences
+
+
+def requested_human(question: str) -> bool:
+    """True when the question explicitly asks for a human reviewer or for legal validation."""
+    for sentence in _sentences(question):
+        if _DESCRIPTIVE_OPENER.match(sentence) and "please" not in sentence:
+            continue
+
+        if HANDOFF_REQUEST.search(sentence):
+            return True
+
+    return False
 
 
 def _missing_smtp_settings() -> list[str]:

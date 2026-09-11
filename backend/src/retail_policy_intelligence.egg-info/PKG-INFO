@@ -1,0 +1,52 @@
+Metadata-Version: 2.4
+Name: retail-policy-intelligence
+Version: 4.1.0
+Summary: Retail Policy Intelligence & Decision Support System - agentic compliance Q&A over policy documents and operational records
+Requires-Python: >=3.12
+Requires-Dist: langgraph==1.0.0
+Requires-Dist: langgraph-checkpoint-postgres>=2.0.0
+Requires-Dist: langchain-core==1.0.1
+Requires-Dist: langchain==1.0.2
+Requires-Dist: langchain-openai==1.0.0
+Requires-Dist: langchain-text-splitters>=0.3.0
+Requires-Dist: llama-index-core>=0.12.0
+Requires-Dist: llama-index-llms-azure-openai>=0.3.0
+Requires-Dist: llama-index-embeddings-azure-openai>=0.3.0
+Requires-Dist: llama-index-vector-stores-postgres>=0.4.0
+Requires-Dist: llama-index-retrievers-bm25>=0.5.0
+Requires-Dist: llama-index-tools-mcp>=0.2.0
+Requires-Dist: llama-parse>=0.5.0
+Requires-Dist: fastapi==0.121.0
+Requires-Dist: uvicorn[standard]==0.38.0
+Requires-Dist: pydantic>=2.9.0
+Requires-Dist: pydantic-settings>=2.6.0
+Requires-Dist: psycopg[binary,pool]>=3.2.0
+Requires-Dist: psycopg2-binary>=2.9.9
+Requires-Dist: asyncpg>=0.30.0
+Requires-Dist: sqlalchemy>=2.0.30
+Requires-Dist: pgvector>=0.3.6
+Requires-Dist: flashrank>=0.2.9
+Requires-Dist: rank-bm25>=0.2.2
+Requires-Dist: stemmer>=0.0.2
+Requires-Dist: pdfplumber>=0.11.0
+Requires-Dist: pymupdf>=1.24.0
+Requires-Dist: python-docx>=1.1.2
+Requires-Dist: guardrails-ai>=0.6.0
+Requires-Dist: presidio-analyzer>=2.2.355
+Requires-Dist: presidio-anonymizer>=2.2.355
+Requires-Dist: spacy>=3.8.0
+Requires-Dist: pyjwt>=2.13.0
+Requires-Dist: slowapi>=0.1.10
+Requires-Dist: python-dotenv>=1.2.1
+Requires-Dist: langfuse>=2.53.0
+Requires-Dist: tenacity>=9.0.0
+Requires-Dist: llama-index-readers-file>=0.7.0
+Requires-Dist: ruff>=0.16.6
+Requires-Dist: duckduckgo-mcp-server>=0.7.0
+Requires-Dist: python-jose[cryptography]>=3.5.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24.0; extra == "dev"
+Requires-Dist: httpx>=0.28.0; extra == "dev"
+Requires-Dist: pytest-cov>=6.0.0; extra == "dev"
+Requires-Dist: ruff>=0.8.0; extra == "dev"

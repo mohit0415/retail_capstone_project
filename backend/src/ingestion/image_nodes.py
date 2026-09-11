@@ -55,6 +55,7 @@ def extract_images_from_pdf(file_path: str, output_dir: str) -> list[dict]:
 
                 data = pixmap.tobytes("png")
             except Exception:
+                logger.debug("could not decode image xref=%s, skipping", xref, exc_info=True)
                 continue
 
             if len(data) < MIN_IMAGE_BYTES:

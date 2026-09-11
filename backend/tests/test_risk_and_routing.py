@@ -71,11 +71,15 @@ def test_high_risk_always_routes_to_the_panel():
     assert route_evidence_path(state) == EvidencePath.HIGH_RISK_PANEL.value
 
 
+# the router degrades only a route the planner did not record (an older checkpoint); a recorded
+# route was already degraded by the planner and is never decided twice (tests/test_v4_workflow.py)
+
+
 def test_hybrid_downgrades_to_policy_when_the_intent_turns_on_policy():
     state = _base_state(
         risk=RiskAssessment(final_level=RiskLevel.MEDIUM),
         intent=IntentResult(intent=Intent.INCIDENT_GUIDANCE),
-        routed_path=EvidencePath.HYBRID.value,
+        plan=_plan(EvidencePath.HYBRID),
         deadline_ts=time.monotonic() + 0.5,
     )
 
@@ -86,11 +90,22 @@ def test_hybrid_downgrades_to_records_when_the_intent_turns_on_records():
     state = _base_state(
         risk=RiskAssessment(final_level=RiskLevel.MEDIUM),
         intent=IntentResult(intent=Intent.RETENTION_QUERY),
-        routed_path=EvidencePath.HYBRID.value,
+        plan=_plan(EvidencePath.HYBRID),
         deadline_ts=time.monotonic() + 0.5,
     )
 
     assert route_evidence_path(state) == EvidencePath.NL2SQL.value
+
+
+def test_a_route_the_planner_recorded_is_never_degraded_a_second_time():
+    state = _base_state(
+        risk=RiskAssessment(final_level=RiskLevel.MEDIUM),
+        intent=IntentResult(intent=Intent.RETENTION_QUERY),
+        routed_path=EvidencePath.HYBRID.value,
+        deadline_ts=time.monotonic() + 0.5,
+    )
+
+    assert route_evidence_path(state) == EvidencePath.HYBRID.value
 
 
 def test_failed_validation_reflects_then_escalates():

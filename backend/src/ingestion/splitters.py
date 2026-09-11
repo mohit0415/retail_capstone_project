@@ -1,4 +1,6 @@
 
+import logging
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_index.core import Document
 from llama_index.core.node_parser import SemanticSplitterNodeParser
@@ -7,6 +9,8 @@ from llama_index.core.schema import BaseNode, TextNode
 from configs.settings import settings
 from src.index.models import get_embed_model
 from src.ingestion.extractors.clause_extraction import CLAUSE_HEADING
+
+logger = logging.getLogger(__name__)
 
 STRUCTURAL_KEYS = [
     "file_name",
@@ -94,6 +98,7 @@ class ClauseAwareSplitter:
         try:
             nodes = self._semantic_splitter().get_nodes_from_documents([document])
         except Exception:
+            logger.debug("semantic splitter failed, using recursive fallback", exc_info=True)
             nodes = self._recursive_fallback(text, metadata)
 
         safe: list[BaseNode] = []

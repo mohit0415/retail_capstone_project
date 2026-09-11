@@ -398,6 +398,110 @@ TEMPLATES: dict[str, SqlTemplate] = {
             LIMIT %(row_limit)s
         """,
     ),
+    "all_vendors": SqlTemplate(
+        template_id="all_vendors",
+        answers="the full vendor roster with each vendor's status, when no filter is named",
+        tables=frozenset({"vendors"}),
+        parameters=(),
+        statement="""
+            SELECT vendor_id, vendor_name, risk_score, risk_category, compliance_status,
+                   approval_status
+            FROM vendors
+            ORDER BY risk_score DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_count_by_risk": SqlTemplate(
+        template_id="vendor_count_by_risk",
+        answers="how many vendors fall into each risk category (a count per band)",
+        tables=frozenset({"vendors"}),
+        parameters=(),
+        statement="""
+            SELECT risk_category, COUNT(*) AS vendor_count
+            FROM vendors
+            GROUP BY risk_category
+            ORDER BY vendor_count DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendor_count_by_compliance": SqlTemplate(
+        template_id="vendor_count_by_compliance",
+        answers="how many vendors sit in each compliance status (a count per status)",
+        tables=frozenset({"vendors"}),
+        parameters=(),
+        statement="""
+            SELECT compliance_status, COUNT(*) AS vendor_count
+            FROM vendors
+            GROUP BY compliance_status
+            ORDER BY vendor_count DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "open_findings_count_by_vendor": SqlTemplate(
+        template_id="open_findings_count_by_vendor",
+        answers=(
+            "how many open findings each vendor carries, split out by severe and overdue - "
+            "the count-per-vendor question, including 'count critical findings per vendor'"
+        ),
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT v.vendor_id, v.vendor_name, v.risk_category, v.compliance_status,
+                   COUNT(*) AS open_findings,
+                   COUNT(*) FILTER (WHERE a.issue_severity IN ('High', 'Critical'))
+                       AS severe_open_findings,
+                   COUNT(*) FILTER (WHERE a.target_resolution_date < %(as_of)s)
+                       AS overdue_findings
+            FROM audit_logs a
+            JOIN vendors v ON v.vendor_id = a.vendor_id
+            WHERE a.remediation_status <> 'Closed'
+            GROUP BY v.vendor_id, v.vendor_name, v.risk_category, v.compliance_status
+            ORDER BY severe_open_findings DESC, open_findings DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "senior_risk_vendors_with_open_findings": SqlTemplate(
+        template_id="senior_risk_vendors_with_open_findings",
+        answers=(
+            "which High or Critical band vendors still carry an unresolved severe finding - "
+            "whether senior-risk vendors are aligned with remediation timelines"
+        ),
+        tables=frozenset({"audit_logs", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT DISTINCT v.vendor_id, v.vendor_name, v.risk_score, v.risk_category,
+                   v.compliance_status, v.approval_status, a.issue_severity,
+                   a.remediation_status, a.target_resolution_date
+            FROM vendors v
+            JOIN audit_logs a ON a.vendor_id = v.vendor_id
+            WHERE v.risk_category IN ('High', 'Critical')
+              AND a.remediation_status <> 'Closed'
+              AND a.issue_severity IN ('High', 'Critical')
+            ORDER BY v.risk_score DESC, a.target_resolution_date
+            LIMIT %(row_limit)s
+        """,
+    ),
+    "vendors_under_escalation": SqlTemplate(
+        template_id="vendors_under_escalation",
+        answers=(
+            "which vendors have BOTH an outstanding review and an unresolved severe finding - "
+            "the vendors genuinely in an escalation state"
+        ),
+        tables=frozenset({"audit_logs", "compliance_reviews", "vendors"}),
+        parameters=(),
+        statement="""
+            SELECT DISTINCT v.vendor_id, v.vendor_name, v.risk_score, v.risk_category,
+                   v.compliance_status, c.review_type, c.review_status, c.next_review_due
+            FROM vendors v
+            JOIN compliance_reviews c ON c.vendor_id = v.vendor_id
+            JOIN audit_logs a ON a.vendor_id = v.vendor_id
+            WHERE c.review_status <> 'Closed'
+              AND a.remediation_status <> 'Closed'
+              AND a.issue_severity IN ('High', 'Critical')
+            ORDER BY v.risk_score DESC
+            LIMIT %(row_limit)s
+        """,
+    ),
 }
 
 RESERVED_PARAMETERS = {"as_of", "row_limit"}

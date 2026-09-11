@@ -54,6 +54,76 @@ IN_DOMAIN_TERMS = {
     "certificate",
     "training",
     "third",
+    # vocabulary of the seven policy documents that the list above did not cover: questions such
+    # as "what is the legal hold process" or "how are passwords managed" were refused as having
+    # "no policy or compliance subject" before retrieval ever ran
+    "hold",
+    "legal",
+    "lawful",
+    "law",
+    "obligation",
+    "requirement",
+    "rule",
+    "standard",
+    "control",
+    "procedure",
+    "process",
+    "framework",
+    "workflow",
+    "classification",
+    "category",
+    "password",
+    "mfa",
+    "authentication",
+    "authorisation",
+    "authorization",
+    "privilege",
+    "logging",
+    "monitoring",
+    "backup",
+    "notification",
+    "notify",
+    "report",
+    "reporting",
+    "response",
+    "deletion",
+    "delete",
+    "destruction",
+    "retain",
+    "period",
+    "deadline",
+    "timeline",
+    "annex",
+    "article",
+    "conflict",
+    "interest",
+    "facilitation",
+    "payment",
+    "donation",
+    "sponsorship",
+    "whistleblowing",
+    "whistleblower",
+    "sanctions",
+    "finding",
+    "findings",
+    "overdue",
+    "expired",
+    "reviewer",
+    "approved",
+    "pending",
+    "rejected",
+    "confidential",
+    "sensitive",
+    "asset",
+    "device",
+    "cloud",
+    "network",
+    "remote",
+    "transfer",
+    "processing",
+    "processor",
+    "controller",
+    "governance",
 }
 
 PLURAL_SUFFIXES = ("ies", "es", "s")
@@ -129,7 +199,11 @@ def is_in_domain(text: str) -> tuple[bool, str]:
     if tokens & IN_DOMAIN_TERMS:
         return True, ""
 
-    return False, "no policy or compliance subject could be identified in the request"
+    # nothing on the list, but nothing off-topic either: the intent classifier reads the whole
+    # question and returns out_of_scope for a question that is not about policy or compliance,
+    # which refuses it there. Refusing here on a word list turned away questions about the
+    # policies themselves that happened not to use one of the listed words.
+    return True, "no listed policy or compliance term; left to the intent classifier"
 
 
 def lexical_risk_floor(text: str) -> tuple[str, list[str]]:

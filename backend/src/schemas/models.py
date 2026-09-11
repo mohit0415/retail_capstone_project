@@ -51,6 +51,8 @@ class RiskAssessment(BaseModel):
     scenario_id: str | None = None
     signals: list[RiskSignal] = Field(default_factory=list)
     disagreement: bool = False
+    probes_run: list[str] = Field(default_factory=list)
+    probes_skipped: list[str] = Field(default_factory=list)
 
 
 class PlanStep(BaseModel):
@@ -103,6 +105,12 @@ class SqlEvidence(BaseModel):
     truncated: bool = False
     rows_filtered_by_scope: int = 0
     generated: bool = False
+    # what the statement was limited to for this role, e.g. "Low and Medium risk vendors only";
+    # empty when the role sees every row
+    scope_note: str = ""
+    # how the query was chosen: "matched" (deterministic template match), "selector" (the
+    # template selector model) or "generated" (no template fitted)
+    selection: str = ""
 
 
 class PanelOpinion(BaseModel):
@@ -124,6 +132,10 @@ class Defect(BaseModel):
     description: str
     offending_claim: str | None = None
     suggested_repair: str = ""
+    # an advisory defect is reported (and attached to the answer as a note) but does not block
+    # release: the validator model's grounding objection to a records answer whose figures the
+    # deterministic row check has already confirmed, after one rewrite
+    advisory: bool = False
 
 
 class ValidationReport(BaseModel):
@@ -146,6 +158,16 @@ class DraftAnswer(BaseModel):
     answer: str
     cited_clauses: list[str] = Field(default_factory=list)
     uncertainty_note: str = ""
+    # the RAG stage turns a false here into the honest "I don't know" reply instead of releasing a
+    # guess (src/nodes/rag_path.py -> src/nodes/no_answer.py)
+    answer_found: bool = Field(
+        default=True,
+        description=(
+            "false only when none of the supplied extracts addresses the question at all; the answer "
+            "then says so and cites nothing. A partial answer is still true, with the gap named in "
+            "uncertainty_note."
+        ),
+    )
 
 
 class AuditRecord(BaseModel):

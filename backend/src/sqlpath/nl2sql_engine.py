@@ -9,9 +9,11 @@ from configs.database import read_only_connection
 from configs.settings import settings
 from src.guardrails.sql_guard import assert_tables_in_scope, validate_generated_sql
 from src.index.models import get_llm
+from src.prompts.langfuse_prompts import render_prompt
 from src.prompts.library import NL2SQL_GENERATION
 from src.schemas.models import SqlEvidence
-from src.sqlpath.templates import SCHEMA_NOTES, tables_visible_to
+from src.sqlpath.scoping import ScopeError, scope_statement
+from src.sqlpath.templates import schema_notes_for, tables_visible_to
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +72,12 @@ def _strip(raw: str) -> str:
 
 
 def generate_sql(question: str, allowed_tables: set[str], as_of: date) -> str:
-    prompt = NL2SQL_GENERATION.format(
+    # the prompt says "spell enum values exactly as the schema notes give them", but the notes it got
+    # listed no values, so a guessed review_status = 'Pending' (not a status) returned zero rows.
+    # schema_notes_for adds each readable table's description with its allowed values.
+    prompt = render_prompt("NL2SQL_GENERATION", NL2SQL_GENERATION,
         schema=role_schema(allowed_tables),
-        schema_notes=SCHEMA_NOTES,
+        schema_notes=schema_notes_for(allowed_tables),
         as_of=as_of,
         row_limit=settings.sql_row_limit,
         tables=", ".join(sorted(tables_visible_to(allowed_tables))),
@@ -121,6 +126,8 @@ def run_generated_sql(
     question: str,
     allowed_tables: set[str],
     as_of: date | None = None,
+    risk_categories: set[str] | None = None,
+    departments: list[str] | None = None,
 ) -> SqlEvidence:
     as_of = as_of or settings.as_of_date
     visible = set(tables_visible_to(allowed_tables))
@@ -132,9 +139,16 @@ def run_generated_sql(
 
     _gate(statement, visible)
 
+    # the generated statement is wrapped so every table it reads is limited to this role's
+    # rows; filtering the rows afterwards missed any result without a risk_category column
+    try:
+        scoped = scope_statement(statement, visible, risk_categories, departments)
+    except ScopeError as exc:
+        raise GeneratedSqlError(str(exc)) from exc
+
     try:
         with read_only_connection() as conn:
-            raw_rows = conn.execute(statement).fetchall()
+            raw_rows = conn.execute(scoped.statement).fetchall()
     except Exception as exc:
         logger.error("generated sql failed to execute: %s", exc)
 
@@ -144,11 +158,13 @@ def run_generated_sql(
 
     return SqlEvidence(
         template_id="generated",
-        statement=statement,
+        statement=scoped.statement,
         parameters={"as_of": str(as_of)},
         row_count=len(rows),
         rows=rows[: settings.sql_row_limit],
         as_of=as_of,
         truncated=len(raw_rows) >= settings.sql_row_limit,
         generated=True,
+        scope_note=scoped.note,
+        selection="generated",
     )

@@ -1,7 +1,10 @@
+import importlib.util
 import logging
 import re
 
 logger = logging.getLogger(__name__)
+
+SPACY_MODEL = "en_core_web_lg"
 
 FALLBACK_PATTERNS = {
     "EMAIL_ADDRESS": re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
@@ -44,6 +47,28 @@ def _load_presidio():
         _anonymizer = False
 
     return _analyzer, _anonymizer
+
+
+def warm_up() -> bool:
+    """Load the PII analyzer before the first request needs it; True when Presidio is available.
+
+    Presidio loads spaCy's en_core_web_lg, which uv.lock does not list. In a fresh virtual environment
+    - a copied or moved project, or a plain `uv sync`, which removes packages the lock file does not
+    name - the model is missing and Presidio downloads it (about two minutes) inside whichever request
+    comes first; that request runs out of its deadline and escalates. Loading it at startup moves the
+    wait out of the user's request.
+    """
+    if importlib.util.find_spec(SPACY_MODEL) is None:
+        logger.warning(
+            "spaCy model %s is not installed in this environment; Presidio downloads it now (one time, "
+            "about two minutes). Install it once with: uv run python -m spacy download %s",
+            SPACY_MODEL,
+            SPACY_MODEL,
+        )
+
+    analyzer, _anonymizer = _load_presidio()
+
+    return bool(analyzer)
 
 
 def _regex_redact(text: str) -> tuple[str, list[str]]:

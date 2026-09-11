@@ -1,8 +1,11 @@
+import logging
 from dataclasses import dataclass, field
 
 from src.guardrails.injection import detect_injection
 from src.guardrails.pii import redact
 from src.guardrails.scope import is_in_domain, lexical_risk_floor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -19,6 +22,8 @@ def run_input_guardrail(raw_query: str) -> GuardrailOutcome:
     injected, snippet = detect_injection(raw_query)
 
     if injected:
+        logger.warning("prompt injection detected snippet=%r", snippet)
+
         return GuardrailOutcome(
             blocked=True,
             sanitised_query=raw_query,
@@ -27,9 +32,17 @@ def run_input_guardrail(raw_query: str) -> GuardrailOutcome:
 
     sanitised, pii_entities = redact(raw_query)
 
+    if pii_entities:
+        logger.info("input PII redacted entities=%s", pii_entities)
+
     in_domain, domain_reason = is_in_domain(sanitised)
 
+    if in_domain and domain_reason:
+        logger.info("query subject not recognised lexically (%s)", domain_reason)
+
     if not in_domain:
+        logger.info("query out of domain: %s", domain_reason)
+
         return GuardrailOutcome(
             blocked=True,
             sanitised_query=sanitised,

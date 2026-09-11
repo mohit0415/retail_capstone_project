@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -10,6 +11,8 @@ EMPTY_RESULT = "empty_result"
 ROW_CAP = "row_cap"
 
 SCOPE_FILTER = "scope_filter"
+
+SCOPE_LIMIT = "scope_limit"
 
 GENERATED_QUERY = "generated_query"
 
@@ -28,6 +31,12 @@ ROW_CAP_STATED = re.compile(
 SCOPE_FILTER_STATED = re.compile(
     r"\bscope\b|\bfiltered\b|\bpartial\b|\bat least\b|\bis a floor\b|\brestricted\b|"
     r"\bnot visible to (?:this|your) role\b",
+    re.I,
+)
+
+SCOPE_LIMIT_STATED = re.compile(
+    r"\bscope\w*\b|\b(?:your|this|the user's) role\b|\bvisible to\b|\bpermitted to see\b|"
+    r"\b(?:low|medium|high|critical)(?:,? (?:and|or|&|/) (?:low|medium|high|critical))+\b",
     re.I,
 )
 
@@ -79,6 +88,18 @@ def disclosures(evidence: SqlEvidence) -> list[Disclosure]:
                     "it is a floor"
                 ),
                 stated_when=ROW_CAP_STATED,
+            )
+        )
+
+    if evidence.scope_note:
+        required.append(
+            Disclosure(
+                key=SCOPE_LIMIT,
+                text=(
+                    f"the query only read the rows this role may see ({evidence.scope_note}), so a count "
+                    "covers that scope, not every record in the database"
+                ),
+                stated_when=SCOPE_LIMIT_STATED,
             )
         )
 
@@ -134,3 +155,64 @@ def undisclosed(evidence: SqlEvidence, answer: str) -> list[Disclosure]:
 
 def caveats(evidence: SqlEvidence) -> list[str]:
     return [item.text for item in disclosures(evidence)] + data_defects(evidence)
+
+
+def with_disclosures(evidence: SqlEvidence, answer: str) -> tuple[str, list[str]]:
+    """The answer with every caveat it left out appended as a note, and the keys that were added.
+
+    The narration prompt asks the model to state each caveat, but a model that forgets one used
+    to fail validation with sql_sanity_failure and send a correct answer round a repair loop. The
+    caveat text is fixed, so it is added here instead of asking the model again.
+    """
+    missing = undisclosed(evidence, answer)
+
+    if not missing:
+        return answer, []
+
+    lines = [f"- {item.text[0].upper()}{item.text[1:]}." for item in missing]
+    note = "Notes on this result:\n" + "\n".join(lines)
+
+    return f"{(answer or '').rstrip()}\n\n{note}", [item.key for item in missing]
+
+
+def rows_for_prompt(evidence: SqlEvidence, limit: int, with_query: bool = False) -> str:
+    """The rows a model reads, headed by how many there are and whether all of them are shown.
+
+    The validator used to get the first 10 rows with no count, saw an answer that named all 31
+    vendors, and reported the extra names and the count as unsupported (sql_sanity_failure).
+
+    ``with_query`` also names the SQL that produced the rows. The validator needs it: a query for
+    "vendors with open reviews" filters on review_status in its WHERE clause and often does not
+    select that column, so from the rows alone "these vendors have open reviews" looks ungrounded.
+    """
+    shown = evidence.rows[:limit]
+
+    if evidence.row_count <= len(shown):
+        header = f"row_count={evidence.row_count}; all {evidence.row_count} rows are listed below"
+    else:
+        header = (
+            f"row_count={evidence.row_count}; only the first {len(shown)} rows are listed below, so count "
+            "from row_count and do not treat a row missing from this list as absent"
+        )
+
+    if evidence.truncated:
+        header += f"; the query hit the {settings.sql_row_limit}-row cap, so row_count is a floor"
+
+    if evidence.scope_note:
+        header += f"; scope: {evidence.scope_note}"
+
+    body = json.dumps(shown, default=str, separators=(",", ":"))
+
+    if not with_query:
+        return f"{header}\n{body}"
+
+    source = "SQL generated for this question" if evidence.generated else f"vetted query {evidence.template_id}"
+    parameters = ", ".join(
+        f"{key}={value}" for key, value in (evidence.parameters or {}).items() if key not in ("row_limit",)
+    )
+    query = f"query: {source}\nSQL: {evidence.statement}"
+
+    if parameters:
+        query += f"\nparameters: {parameters}"
+
+    return f"{query}\n{header}\n{body}"

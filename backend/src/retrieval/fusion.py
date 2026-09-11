@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from llama_index.core.retrievers import BaseRetriever, QueryFusionRetriever, VectorIndexAutoRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle
@@ -7,7 +8,7 @@ from llama_index.core.vector_stores.types import MetadataInfo, VectorStoreInfo
 
 from configs.settings import settings
 from src.index.models import get_llm
-from src.index.vector_index import load_or_create_index
+from src.index.vector_index import load_lexical_corpus, load_or_create_index
 
 logger = logging.getLogger(__name__)
 
@@ -116,28 +117,82 @@ def _build_vector_retriever(index, filters: MetadataFilters, top_k: int) -> Base
     return AutoWithFallbackRetriever(auto, plain)
 
 
+def _in_scope(node, allowed_doc_types: list[str]) -> bool:
+    metadata = node.metadata or {}
+
+    return metadata.get("doc_type") in allowed_doc_types and metadata.get("is_current") is not False
+
+
+# The BM25 index used to be rebuilt (tokenise + stem every node) on every single
+# retrieval. It only changes when the corpus changes, so it is cached per role scope
+# and per corpus snapshot; an ingest or rebuild produces a new corpus list and with
+# it a new cache key.
+_BM25_CACHE: dict[tuple, object] = {}
+_BM25_CACHE_LIMIT = 16
+_bm25_lock = threading.Lock()
+
+
+def clear_bm25_cache() -> None:
+    with _bm25_lock:
+        _BM25_CACHE.clear()
+
+
 def _build_bm25_retriever(index, allowed_doc_types: list[str], top_k: int):
     try:
         from llama_index.retrievers.bm25 import BM25Retriever
+    except Exception as exc:
+        logger.warning("BM25 retriever unavailable (%s); retrieval is vector only", exc)
+        return None
 
-        candidates = [
-            node
-            for node in index.docstore.docs.values()
-            if (node.metadata or {}).get("doc_type") in allowed_doc_types
-            and (node.metadata or {}).get("is_current") is not False
-        ]
+    source = "docstore"
+
+    try:
+        docstore_nodes = list(index.docstore.docs.values())
     except Exception as exc:
         logger.warning("could not read the docstore for BM25: %s", exc)
-        return None
+        docstore_nodes = []
+
+    candidates = [node for node in docstore_nodes if _in_scope(node, allowed_doc_types)]
+    corpus = getattr(index, "docstore", None)
 
     if not candidates:
-        logger.warning("docstore holds no nodes in scope; BM25 leg skipped, retrieval is vector only")
+        source = "vector_table"
+        corpus = load_lexical_corpus()
+        candidates = [node for node in corpus if _in_scope(node, allowed_doc_types)]
+
+    # the cache entry holds on to the corpus list it was built from, so id(corpus) cannot be
+    # reused by a newer corpus while the entry is alive
+    size = len(docstore_nodes) if source == "docstore" else len(corpus)
+    key = (tuple(sorted(allowed_doc_types)), min(top_k, len(candidates)), source, id(corpus), size)
+
+    with _bm25_lock:
+        cached = _BM25_CACHE.get(key)
+
+    if cached is not None and candidates:
+        return cached[0]
+
+    if not candidates:
+        logger.warning(
+            "no nodes in scope for BM25 (docs=%s); leg skipped, retrieval is vector only", allowed_doc_types
+        )
         return None
 
-    return BM25Retriever.from_defaults(
+    logger.debug(
+        "bm25 leg built from %s nodes=%d top_k=%d", source, len(candidates), min(top_k, len(candidates))
+    )
+
+    retriever = BM25Retriever.from_defaults(
         nodes=candidates,
         similarity_top_k=min(top_k, len(candidates)),
     )
+
+    with _bm25_lock:
+        if len(_BM25_CACHE) >= _BM25_CACHE_LIMIT:
+            _BM25_CACHE.clear()
+
+        _BM25_CACHE[key] = (retriever, corpus)
+
+    return retriever
 
 
 def build_fusion_retriever(

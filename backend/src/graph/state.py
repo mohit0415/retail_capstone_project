@@ -37,6 +37,7 @@ class AgentState(TypedDict, total=False):
     raw_query: str
     sanitised_query: str
     standalone_query: str
+    rewrite_mode: str
     conversation_history: list[dict]
     thread_summary: str
 
@@ -45,24 +46,30 @@ class AgentState(TypedDict, total=False):
     resolved_entities: list[ResolvedEntity]
     clarification_question: str | None
 
+    risk_l2: dict | None
     risk: RiskAssessment | None
     plan: EvidencePlan | None
     routed_path: str | None
     path_decision: dict | None
     plan_from_reflection: bool
     replan_directive: str
+    repair_strategy: str
     evidence_path: str | None
 
     retrieved_chunks: Annotated[list[RetrievedChunk], merge_chunks]
     sql_evidence: SqlEvidence | None
+    sql_failure: str
     panel_verdict: PanelVerdict | None
 
     draft: DraftAnswer | None
     validation: ValidationReport | None
+    validation_llm_skipped: str
     reflection_count: int
     panel_repair_count: int
 
     confidence: ConfidenceBreakdown | None
+    answer_not_found: bool
+    not_found_reason: str
     terminal_outcome: str | None
     refusal_reason: str | None
     escalation_reason: str | None
@@ -79,6 +86,8 @@ class AgentState(TypedDict, total=False):
     degraded: bool
     skipped_optional_nodes: Annotated[list[str], operator.add]
     budget_stops: Annotated[list[dict], operator.add]
+
+    model_routing: Annotated[list[dict], operator.add]
 
     marks: Annotated[list[dict], operator.add]
     trace: Annotated[list[dict], operator.add]
@@ -109,27 +118,34 @@ def initial_state(
         raw_query=raw_query,
         sanitised_query=raw_query,
         standalone_query=raw_query,
+        rewrite_mode="",
         conversation_history=conversation_history or [],
         thread_summary=thread_summary,
         intent=None,
         document_scope_request=document_scope_request or [],
         resolved_entities=[],
         clarification_question=None,
+        risk_l2=None,
         risk=None,
         plan=None,
         routed_path=None,
         path_decision=None,
         plan_from_reflection=False,
         replan_directive="",
+        repair_strategy="",
         evidence_path=None,
         retrieved_chunks=[],
         sql_evidence=None,
+        sql_failure="",
         panel_verdict=None,
         draft=None,
         validation=None,
+        validation_llm_skipped="",
         reflection_count=0,
         panel_repair_count=0,
         confidence=None,
+        answer_not_found=False,
+        not_found_reason="",
         terminal_outcome=None,
         refusal_reason=None,
         escalation_reason=None,
@@ -144,6 +160,7 @@ def initial_state(
         degraded=False,
         skipped_optional_nodes=[],
         budget_stops=[],
+        model_routing=[],
         marks=[],
         trace=[],
     )

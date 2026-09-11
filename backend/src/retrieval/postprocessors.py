@@ -11,6 +11,27 @@ logger = logging.getLogger(__name__)
 
 MEDIA_CONTENT_TYPES = {"image_caption", "table_summary"}
 
+# headings that name a kind of extract rather than its subject; they tell the reranker nothing
+UNINFORMATIVE_HEADINGS = {"", "general", "figures", "untitled"}
+
+
+def with_heading(heading: str | None, content: str) -> str:
+    """The text the cross-encoder reads for one extract: its section heading, then its text.
+
+    The embeddings carry the section in their metadata, so fusion ranks "§7.1 Investigation
+    Principles" fourth for "tell me about the investigation principles"; its text alone is the bullet
+    list "- Confidentiality - Fairness and neutrality - ...", and the reranker - which read only that
+    - scored it 0.00 and dropped it from the six extracts the writer sees. The writer then said the
+    policy does not detail investigation principles, and the answer escalated.
+    """
+    heading = (heading or "").strip()
+    content = content or ""
+
+    if heading.lower() in UNINFORMATIVE_HEADINGS or heading.lower() in content[:200].lower():
+        return content
+
+    return f"{heading}\n{content}"
+
 
 class KeepTopN(BaseNodePostprocessor):
     top_n: int = 6
@@ -74,9 +95,12 @@ class FlashRankRerank(BaseNodePostprocessor):
                 try:
                     content = node.get_content()
                 except Exception:
+                    logger.debug("node.get_content() failed, falling back to str(node)", exc_info=True)
                     content = str(node)
 
-                passages.append({"id": position, "text": content})
+                metadata = getattr(node, "metadata", {}) or {}
+
+                passages.append({"id": position, "text": with_heading(metadata.get("section"), content)})
 
             ranked = self.ranker.rerank(RerankRequest(query=query, passages=passages))
 

@@ -33,6 +33,8 @@ def _table_boxes(pymupdf, page) -> list:
     try:
         return [pymupdf.Rect(table.bbox) for table in page.find_tables().tables]
     except Exception:
+        logger.debug("table-box detection failed on a page", exc_info=True)
+
         return []
 
 

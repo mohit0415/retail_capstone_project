@@ -58,14 +58,78 @@ def planner_returns(monkeypatch):
     return _install
 
 
-def test_a_records_question_is_clamped_even_when_the_model_asks_for_rag(planner_returns):
+def test_a_status_question_is_clamped_even_when_the_model_asks_for_rag(planner_returns):
+    planner_returns(_plan(EvidencePath.RAG))
+
+    # two status filters, so no single vetted query answers it and the planner model is asked
+    question = "which vendors are non compliant and still approved"
+    result = planner_module.planner_node(_state(Intent.VENDOR_STATUS, standalone_query=question))
+
+    assert result["routed_path"] == EvidencePath.NL2SQL.value
+    assert result["path_decision"]["clamped"]
+    assert result["plan"].path is EvidencePath.NL2SQL
+    assert result["path_decision"]["planner"] == "llm"
+
+
+def test_a_plain_status_question_skips_the_planner_model(monkeypatch):
+    def _fail(_name):
+        raise AssertionError("a vetted query answers this, the planner model must not be called")
+
+    monkeypatch.setattr(planner_module, "model_for", _fail)
+
+    result = planner_module.planner_node(_state(Intent.VENDOR_STATUS))
+
+    assert result["routed_path"] == EvidencePath.NL2SQL.value
+    assert result["path_decision"]["planner"] == "vetted_query"
+    assert result["tokens_spent"] == 0
+    assert "vendors_by_compliance_status" in result["plan"].steps[0].objective
+
+
+def test_a_single_path_intent_never_asks_the_planner_model(monkeypatch):
+    def _fail(_name):
+        raise AssertionError("the planner model must not be called when only one path is possible")
+
+    monkeypatch.setattr(planner_module, "model_for", _fail)
+
+    result = planner_module.planner_node(_state(Intent.RECORD_LOOKUP))
+
+    assert result["routed_path"] == EvidencePath.NL2SQL.value
+    assert result["path_decision"]["planner"] == "deterministic"
+    assert result["tokens_spent"] == 0
+    assert result["plan"].steps[0].source == "compliance_db"
+
+
+def test_a_high_risk_question_never_asks_the_planner_model(monkeypatch):
+    monkeypatch.setattr(planner_module, "model_for", lambda _name: pytest.fail("planner model called"))
+
+    state = _state(Intent.COMPLIANCE_CHECK, risk=RiskAssessment(final_level=RiskLevel.HIGH))
+    result = planner_module.planner_node(state)
+
+    assert result["routed_path"] == EvidencePath.HIGH_RISK_PANEL.value
+    assert result["path_decision"]["planner"] == "deterministic"
+
+
+def test_a_retention_question_from_a_role_without_tables_skips_the_planner_model(monkeypatch):
+    monkeypatch.setattr(planner_module, "model_for", lambda _name: pytest.fail("planner model called"))
+
+    result = planner_module.planner_node(_state(Intent.RETENTION_QUERY, scopes=ASSOCIATE_SCOPES))
+
+    assert result["routed_path"] == EvidencePath.RAG.value
+    assert result["path_decision"]["planner"] == "deterministic"
+    assert result["plan"].steps[0].source == "policy_kb"
+
+
+def test_the_skip_can_be_switched_off(planner_returns, monkeypatch):
+    from configs.settings import settings
+
+    monkeypatch.setattr(settings, "skip_planner_for_single_path", False)
     planner_returns(_plan(EvidencePath.RAG))
 
     result = planner_module.planner_node(_state(Intent.RECORD_LOOKUP))
 
     assert result["routed_path"] == EvidencePath.NL2SQL.value
     assert result["path_decision"]["clamped"]
-    assert result["plan"].path is EvidencePath.NL2SQL
+    assert result["path_decision"]["planner"] == "llm"
 
 
 def test_a_policy_question_is_clamped_even_when_the_model_asks_for_agentic(planner_returns):
@@ -77,12 +141,21 @@ def test_a_policy_question_is_clamped_even_when_the_model_asks_for_agentic(plann
 
 
 def test_a_permitted_choice_is_left_alone(planner_returns):
+    planner_returns(_plan(EvidencePath.RAG))
+
+    result = planner_module.planner_node(_state(Intent.INCIDENT_GUIDANCE))
+
+    assert result["routed_path"] == EvidencePath.RAG.value
+    assert not result["path_decision"]["clamped"]
+
+
+def test_an_agentic_proposal_is_clamped_because_the_v4_workflow_has_no_agentic_route(planner_returns):
     planner_returns(_plan(EvidencePath.AGENTIC, source="both"))
 
-    result = planner_module.planner_node(_state(Intent.COMPLIANCE_CHECK))
+    result = planner_module.planner_node(_state(Intent.INCIDENT_GUIDANCE))
 
-    assert result["routed_path"] == EvidencePath.AGENTIC.value
-    assert not result["path_decision"]["clamped"]
+    assert result["routed_path"] == EvidencePath.HYBRID.value
+    assert result["path_decision"]["clamped"]
 
 
 def test_high_risk_overrides_the_model_entirely(planner_returns):
@@ -99,8 +172,11 @@ def test_a_role_without_tables_cannot_be_routed_at_a_records_question(planner_re
 
     result = planner_module.planner_node(_state(Intent.RECORD_LOOKUP, scopes=ASSOCIATE_SCOPES))
 
-    assert result["routed_path"] == "escalate"
-    assert result["escalation_reason"]
+    # an honest "your role cannot read that" reply, not a review request
+    assert result["routed_path"] == "no_access"
+    assert result["not_found_reason"] == "no_access"
+    assert "escalation_reason" not in result
+    assert "no table" in result["path_decision"]["reason"]
 
 
 def test_a_model_failure_falls_back_to_the_intent_default(monkeypatch):
@@ -126,8 +202,8 @@ def test_a_reflection_plan_is_honoured_instead_of_being_re_drafted(monkeypatch):
     monkeypatch.setattr(planner_module, "model_for", _explode)
 
     state = _state(
-        Intent.COMPLIANCE_CHECK,
-        plan=_plan(EvidencePath.AGENTIC, source="both", revision=1),
+        Intent.INCIDENT_GUIDANCE,
+        plan=_plan(EvidencePath.RAG, revision=1),
         plan_from_reflection=True,
         validation=ValidationReport(passed=False),
         replan_directive="widen retrieval to the vendor policy",
@@ -135,7 +211,7 @@ def test_a_reflection_plan_is_honoured_instead_of_being_re_drafted(monkeypatch):
 
     result = planner_module.planner_node(state)
 
-    assert result["routed_path"] == EvidencePath.AGENTIC.value
+    assert result["routed_path"] == EvidencePath.RAG.value
     assert result["path_decision"]["replanned"]
     assert result["plan"].revision == 1
     assert result["tokens_spent"] == 0

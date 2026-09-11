@@ -125,6 +125,7 @@ def build_structural_metadata(
     try:
         effective_date = date.fromisoformat(effective)
     except ValueError:
+        logger.debug("invalid effective_date %r in frontmatter, using default", effective)
         effective_date = date(2025, 1, 1)
 
     title = frontmatter.get("title") or Path(original_filename).stem.replace("_", " ").title()
