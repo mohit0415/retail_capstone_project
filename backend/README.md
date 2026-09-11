@@ -25,11 +25,11 @@ of them can end the request:
                           |
                     risk_assessment  (L1 lexical, L2 classifier, L3 SQL probe)
                           |
-                       planner
+                       planner  (route: rag | nl2sql | hybrid | high_risk_panel)
                           |
-        +--------+--------+--------+---------+-------------+
-       rag    nl2sql    hybrid   agentic   multi_agent_panel
-        +--------+--------+--------+---------+-------------+
+        rag_path --> nl2sql_path --> multi_agent_panel     (only the stages the route needs,
+                          |                                  always in this order)
+                          |---- evidence does not answer it --> no_answer ("I don't know")
                           |
                  compliance_validation --- defects --> reflection --> planner
                           |
@@ -44,13 +44,21 @@ Three things about this shape are worth stating because they are easy to get wro
 
 **Risk does not choose the path.** Only `High` forces a path, and the path it forces is the
 multi-agent panel. `Low` and `Medium` are treated identically by the router. Which of rag / nl2sql /
-hybrid / agentic runs is decided by the **intent**, not by the planner's free choice: the intent
-fixes a small set of admissible paths and the planner may only pick inside it. Section 15 is the
-decision table and the reasoning behind it.
+hybrid runs is decided by the **intent**, not by the planner's free choice: the intent fixes a small
+set of admissible paths and the planner may only pick inside it. Section 15 is the decision table and
+the reasoning behind it. (The v4 workflow has no agentic route; no intent admits one.)
+
+**The evidence stages have one order.** RAG first, then NL2SQL, then the multi-agent panel, then
+compliance validation. A route runs only the stages it needs — `rag` is `rag_path`, `nl2sql` is
+`nl2sql_path`, `hybrid` is `rag_path → nl2sql_path` (the records stage writes the reconciled
+answer), High risk is `rag_path → nl2sql_path → multi_agent_panel` — but never in another order.
+`docs/AGENT_WORKFLOW.md` has the full diagram.
 
 **Every terminal state is a real state.** `answered`, `escalated`, `refused` and
 `clarification_required` are the only four ways out. A request that cannot be certified escalates; it
-never returns a hedge.
+never returns a hedge. A request whose evidence simply does not contain the answer is *not*
+escalated: it is answered with an honest "I don't know" (`no_answer`, `not_found: true`), because a
+reviewer cannot certify an answer nobody can source.
 
 **Escalation is a node, not a return code.** Anything that decides the answer cannot be released
 routes into `escalation_manager`, which writes the review queue row. That includes the output
@@ -254,17 +262,30 @@ escalation node, writes the queue row, and stops there with the checkpoint intac
    conditional edge out of `escalation_manager`.
 
 For `accept` and `edit` that edge routes to `output_guardrail`, so **the human's answer passes the
-same PII scrub and citation check as a machine-generated one**. A reviewer who pastes in a clause
-that was never retrieved gets caught. For `reject` the state is updated but the graph is not resumed,
-and the request stays escalated.
+same PII scrub and the same "cite only what was retrieved" check as a machine-generated one**. A
+reviewer who pastes in a clause that was never retrieved gets caught. A reviewer's answer is *not*
+required to carry `[Document §clause]` markers: the reviewer is accountable for it, and demanding
+citations blocked every plain-text edit. For `reject` the state is updated but the graph is not
+resumed, nothing is released, and `GET /requests/{id}` reports `rejected` with no answer.
+
+**The check runs before the decision is recorded.** Recording the decision is what stops two
+reviewers releasing the same request, so it used to happen first - and an answer the guardrail then
+refused left the request marked `reviewed` with nothing released: a second attempt got `409`, and
+the asker never received an answer. Now `POST /review/{id}` runs the output guardrail on the reviewed
+answer first (with the extracts stored in the review package) and answers `422` with the reason if it
+would be refused, leaving the request in the queue so the reviewer can correct it and submit again.
+If the resumed graph still refuses the answer (for example the PII check could not run), the request
+is put back in the queue instead of being left half-reviewed.
 
 The loop is bounded deliberately: if the guardrail rejects a reviewed answer,
 `after_output_guardrail` sees `reviewer_decision` is set and routes to `END` rather than back to
-escalation. The response says the answer did not pass and names the reason. Without that check the
-pair of conditional edges would cycle forever.
+escalation. Without that check the pair of conditional edges would cycle forever.
 
-If the checkpointer fell back to `MemorySaver` (Postgres unavailable) the checkpoint may be gone. The
-endpoint reports `resumed: false` with a note rather than pretending the answer was validated.
+Checkpoints are keyed per request (`<thread_id>:<request_id>`). The resume only uses a checkpoint whose
+`request_id` is the one under review - an escalation queued before per-request keys can find its chat's
+checkpoint holding a later question's run. When no checkpoint of this request can be resumed (that case,
+or the in-memory checkpointer after a restart), the answer that already passed the guardrail check is
+released directly, recorded in the audit log, and the response says `resumed: false`.
 
 ---
 
@@ -492,34 +513,52 @@ copy and is not what the initialiser reads.
 | `SLO_PATH_TARGET_RATIO` | 0.85 | at 1.0 the target restates the deadline and never warns early |
 | `CONVERSATION_REWRITE_TURNS` | 5 | the rewrite loses the referent a follow-up depends on |
 | `PII_ENTITIES` | a bare comma-separated list | a malformed value silently disables redaction for the first entity in it |
+| `MODEL_ROUTING_STRATEGY` | `heuristic` | `static` restores the fixed strong tier for every generation call and the cost report flattens |
+| `SEMANTIC_CACHE_THRESHOLD` | 0.95 | lower and two different questions start sharing an answer; 1.0 is exact-match only |
+| `ROUTING_LATENCY_PRESSURE_SECONDS` | 8.0 | under it a routable node drops to the small tier; 0 disables the latency downgrade |
+| `COST_BUDGET_USD_PER_REQUEST` | 0.05 | a soft ceiling: exceeding it is logged and counted, never blocked |
 
 Changing `.env` needs a restart — `uvicorn --reload` watches `.py` files, not `.env`.
 
 ### Calling it
 
-```bash
-# 1. mint a token; role is one of store_associate, store_manager,
-#    compliance_officer, legal_reviewer, admin
-curl -X POST localhost:8000/auth/token -H 'content-type: application/json' \
-  -d '{"user_id":"mohit","role":"compliance_officer","departments":["Compliance"]}'
+Tokens are minted by **Auth0**, not by this backend (RBAC follows the practice-1 travel planner
+method: `src/auth/security.py` validates the RS256 JWT against the tenant's JWKS and reads the
+roles the `add-roles-to-tokens` Action put under `https://stateful-agent.com/roles`). The React
+frontend in `../frontend` does this for you; for curl / Swagger get an access token from Auth0 first
+(e.g. log in through the frontend and copy it from the browser devtools, or use the Auth0 API
+explorer with the `https://api.stateful-agent.com` audience).
 
-# 2. ask; document_scope is optional and only ever narrows
+```bash
+TOKEN="eyJ..."   # Auth0 access token for a user with one of the five roles
+
+# 1. who am I according to the backend: role, scopes, screens
+curl localhost:8000/auth/me -H "authorization: Bearer $TOKEN"
+
+# 2. hand over the Azure OpenAI credentials typed on the login page (any role)
+curl -X POST localhost:8000/auth/azure -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"endpoint":"https://<resource>.openai.azure.com/","api_key":"...","small_deployment":"gpt-4o-mini","strong_deployment":"gpt-4o","embedding_deployment":"text-embedding-3-small"}'
+
+# 3. ask; document_scope is optional and only ever narrows
 curl -X POST localhost:8000/ask -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"query":"What is the retention period for customer transaction records?"}'
 
-# 3. follow up in the same thread by passing back the thread_id you got
-# 4. reviewer endpoints
+# 4. follow up in the same thread by passing back the thread_id you got
+# 5. reviewer endpoints
 curl localhost:8000/review/queue        -H "authorization: Bearer $TOKEN"
 curl localhost:8000/metrics/slo         -H "authorization: Bearer $TOKEN"
 ```
 
-In the Swagger page, click **Authorize** and paste the `access_token` value on its own — Swagger adds
+In the Swagger page, click **Authorize** and paste the Auth0 access token on its own — Swagger adds
 the word `Bearer` itself.
 
-Two things to know when testing. Repeating an identical query returns a cached response for 15
-minutes without running the graph, because `build_key` falls back to hashing the request body when no
-`Idempotency-Key` header is present; change a word or send a key. And a `202` body always carries a
+Two things to know when testing. Repeating an identical query that was *answered* (`200`) returns the
+same response for 15 minutes without running the graph, because `build_key` falls back to hashing the
+request body when no `Idempotency-Key` header is present; change a word or send a key. A `202
+pending_review` is only replayed for a retry that sends the same `Idempotency-Key` - without a key the
+question runs again, so asking again after a review does not come back as the old pending body. And a `202` body always carries a
 `reason` that names the exact gate that fired, which is the fastest way to find out why something
 escalated.
 
@@ -784,8 +823,8 @@ call, no I/O, fully unit-tested. Every rule below is one row of `RULES`.
 | `record_lookup` | `nl2sql` | `nl2sql` | records | — | The answer is a row. Policy text cannot state what a record holds. |
 | `vendor_status` | `nl2sql` | `nl2sql`, `hybrid` | records | `nl2sql` | Status is a stored column. Policy only enters when the question also asks whether that status is permitted. |
 | `retention_query` | `hybrid` | `rag`, `nl2sql`, `hybrid` | both | `nl2sql` | "How long do we keep X" is policy; "what is overdue" is a record. The question can be either, so all three are admissible. |
-| `compliance_check` | `hybrid` | `hybrid`, `agentic` | both | `hybrid` | This intent *is* a rule checked against a record. Answering from one side alone is a wrong answer, not a partial one. |
-| `incident_guidance` | `agentic` | `agentic`, `hybrid` | both | `hybrid` | The only case where the next lookup depends on what the last one returned. That is what agentic is for and the only thing it is for. |
+| `compliance_check` | `hybrid` | `hybrid` | both | `hybrid` | This intent *is* a rule checked against a record. Answering from one side alone is a wrong answer, not a partial one. |
+| `incident_guidance` | `hybrid` | `rag`, `hybrid` | both | `rag` | What to do is written in policy; a record only sharpens it when the incident names one. (Was `agentic`, which the v4 workflow does not have.) |
 | any, when risk fuses to `High` | `high_risk_panel` | — | both | — | Mandatory. The panel is not a path the planner may decline. |
 
 The planner still writes the evidence plan — the steps, the objectives, the `must_prove` statements
@@ -800,10 +839,12 @@ the set throws its reasoning away rather than widening what the system does.
 Two checks run after the clamp, both deterministic, both in `_apply_capability_gates`.
 
 A path that reads records, for a role granted no table: if the question turns only on records, the
-request **escalates**. It does not quietly fall back to RAG. A `store_associate` asking "is Sable
-Analytics compliant" gets a review record, not a policy essay that never answers the question. If
-the question turns on both sources, it falls back to the half that is available and sets
-`partial_evidence`, which costs confidence and has to be disclosed.
+route is `no_access` and the reply says plainly that this role cannot read the source that answers
+it. It does not quietly fall back to RAG, and it is not queued for review either — a reviewer must not
+hand a role data it may not read. A `store_associate` asking "is Sable Analytics compliant" gets "I
+can't answer this with your access…", not a policy essay that never answers the question. (A user who
+explicitly asks for a human still gets one.) If the question turns on both sources, it falls back to
+the half that is available and sets `partial_evidence`, which costs confidence and has to be disclosed.
 
 A path that reads documents, for a role granted none: the mirror image.
 
@@ -1021,3 +1062,485 @@ question is faster, cheaper, correct by review, and releases at higher confidenc
 The obvious gaps this failure exposed: a full vendor roster, a `GROUP BY` count of vendors per
 status, all open findings, and all retention records. Add those and the four most likely "show me
 everything" questions never reach tier 2 at all.
+mohit
+## 17. API reference — every endpoint
+
+Base URL: `http://localhost:8000` · Interactive docs (Swagger): `http://localhost:8000/docs`
+
+**One rule that catches everyone:** every endpoint except `GET /health` requires an **Auth0**
+JWT (RS256, audience `API_AUDIENCE`). Log in through the frontend (or the Auth0 API explorer), then
+send the access token as `Authorization: Bearer <token>` on every call. In the Swagger page it is
+*not* attached automatically — click **Authorize** and paste only the token, without the word
+`Bearer`.
+
+Shell snippets below assume you have saved a token:
+
+```bash
+TOKEN="eyJ..."   # an Auth0 access token
+```
+
+### 17.1 `GET /health` — no auth
+Liveness plus DB state, audit-log circuit status, escalation queue depth, and the active
+`confidence_threshold` / deadlines.
+
+```bash
+curl http://localhost:8000/health
+```
+
+### 17.2 `GET /auth/me` — who the token is
+Returns the role the Auth0 token resolved to, its access scopes (`doc:*`, `table:*`, `risk:*`),
+`departments`, the raw `auth0_roles`, the `permissions` flags and the `screens` the frontend may
+open. The role names in Auth0 must be exactly
+`store_associate`, `store_manager`, `compliance_officer`, `legal_reviewer`, `admin`
+(`user` from practice-1 maps to `store_associate`; several roles → the most privileged wins;
+no recognised role → `403`).
+
+```bash
+curl http://localhost:8000/auth/me -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.2a `POST /auth/azure` — Azure OpenAI credentials from the login page
+The frontend never keeps the Azure key in a `.env`; the user types it on the login page and the
+frontend sends it here once after the Auth0 login. With `verify` (default `true`) the backend makes one
+tiny embedding call and one tiny chat call first and answers `400` if either deployment rejects the
+key, otherwise it swaps the values into the running settings and drops every cached model client
+(`src/auth/azure_credentials.py`). `GET /health` reports `azure_configured` afterwards.
+
+```bash
+curl -X POST http://localhost:8000/auth/azure \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"endpoint": "https://<resource>.openai.azure.com/", "api_key": "...", "api_version": "2024-10-21",
+       "small_deployment": "gpt-4o-mini", "strong_deployment": "gpt-4o", "embedding_deployment": "text-embedding-3-small"}'
+```
+
+### 17.3 `POST /ask` — the main endpoint
+Body is `AskRequest`: `query` (required, 3–2000 chars), `thread_id` (optional, to continue a
+conversation), `document_scope` (optional, only ever *narrows* what the role can already read).
+Optional header `Idempotency-Key: <any-string>` makes a retry return the first result instead of
+re-running.
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "List all vendors in the Low risk category."}'
+```
+
+Two possible status codes:
+- **`200`** — a terminal result. Read the `status` field: `answered` (answer + citations),
+  `refused` (out of domain), or `clarification_required` (an entity was ambiguous or unresolved).
+- **`202`** — `pending_review`. The system could not certify an answer and queued it for a human;
+  no draft is returned. Poll the `poll_url` it gives you.
+
+**Cache behaviour (section 18.2).** A question that a caller in the *same access scope* (role,
+scopes, departments, `document_scope`) already had certified is answered from the response cache:
+same body, a fresh `request_id`, `timings.total_ms` in single-digit milliseconds, and a `cache`
+block naming the kind of hit (`exact` / `semantic`), the similarity, the age and the
+`source_request_id`. Pass `"use_cache": false` to force a graph run. Follow-ups that carry
+conversation history are never served from cache. Every response's `trace` now also carries
+`model_routing` (which tier each routable model call used, and why) and `llm_usage` (the tokens
+the provider actually billed and their USD cost).
+
+### 17.4 `GET /requests/{request_id}` — poll an escalated request
+After a `202`, take the `request_id` and poll here until a reviewer acts.
+
+```bash
+curl http://localhost:8000/requests/<request_id> \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Returns `pending_review` while it waits, then `answered` with the released answer (the text that passed
+the output guardrail, PII scrubbed) and `reviewer_decision` (`accept` or `edit`), or `rejected` with a
+`note` and no answer when the reviewer rejected it.
+
+### 17.5 `GET /review/queue` — reviewer only
+Everything currently waiting for review. Needs `compliance_officer`, `legal_reviewer`, or `admin`.
+
+```bash
+curl http://localhost:8000/review/queue -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.6 `GET /review/{request_id}` — reviewer only
+The full context package for one escalated request: original query, retrieved documents, SQL
+evidence, validation output, reasoning trace, draft answer, risk and confidence.
+
+```bash
+curl http://localhost:8000/review/<request_id> -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.7 `POST /review/{request_id}` — reviewer submits a decision
+Body is `ReviewSubmission`: `decision` is `accept`, `edit`, or `reject`; `edited_answer` (used with
+`edit`); `reviewer_notes` (optional).
+
+```bash
+curl -X POST http://localhost:8000/review/<request_id> \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "edit", "edited_answer": "Corrected answer text.", "reviewer_notes": "fixed clause ref"}'
+```
+
+`accept`/`edit` are checked by the output guardrail first: a reviewed answer citing a clause that was
+never retrieved (or failing the PII check) is answered `422` with the reason and nothing is recorded -
+fix it with `edit` and submit again. A passing answer is recorded, the graph checkpoint is resumed, and
+the `200` response carries `released: true` and the final `answer`. Clause citations are not required
+in a reviewer's text. `reject` records the decision and releases nothing. A second decision on the same
+request is `409`.
+
+### 17.8 `POST /ingest` — admin only, upload one policy document
+Multipart file upload. Accepted types: `.md`, `.pdf`, `.docx`, `.txt`. `force=true` re-ingests even
+if the file is unchanged.
+
+```bash
+curl -X POST "http://localhost:8000/ingest?force=false" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/path/to/Supplier_Vendor_Compliance_Policy.pdf"
+```
+
+### 17.9 `GET /ingest/status` — admin only
+Corpus health: what is indexed, the active embed model and whether it is compatible, and
+`unindexed_files`. This is the endpoint to check when `/ask` escalates with a no-match reason.
+
+```bash
+curl http://localhost:8000/ingest/status -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.10 `POST /ingest/rebuild?confirm=true` — admin only
+Empties the vector table and re-ingests every document in the corpus directory (one full embedding
+pass). `confirm=true` is required or it refuses.
+
+```bash
+curl -X POST "http://localhost:8000/ingest/rebuild?confirm=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.11 `GET /metrics/slo?hours=24` — reviewer only
+Latency percentiles per stage and per evidence path, plus SLO breaches and outcome counts. `hours`
+is 1–720 and defaults to the configured window.
+
+```bash
+curl "http://localhost:8000/metrics/slo?hours=24" -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.11a `GET /metrics/optimization` — reviewer only
+Cost and latency evidence (section 18): hit rates and the milliseconds / tokens each cache
+returned (`caches`), how many routable model calls went to the small tier and why (`routing`),
+and real token usage and USD spend per model and per tier with the per-request mean and peak
+against `COST_BUDGET_USD_PER_REQUEST` (`cost`).
+
+```bash
+curl http://localhost:8000/metrics/optimization -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.11b `POST /cache/invalidate?reason=...` — admin only
+Drops every cached answer, chunk list and completion. The ingestion endpoints do this on their
+own after the corpus changes; this is for a manual reset (a prompt edit in Langfuse, a seed
+reload).
+
+```bash
+curl -X POST "http://localhost:8000/cache/invalidate?reason=prompt-change" -H "Authorization: Bearer $TOKEN"
+```
+
+### 17.12 Typical end-to-end flow
+
+```
+Auth0 login (frontend)    -> $TOKEN with the roles claim
+GET  /auth/me             -> role, scopes, screens
+POST /auth/azure          -> Azure OpenAI credentials from the login page
+POST /ask                 -> 200 answered  (done)
+                          -> 202 pending_review (has request_id + poll_url)
+GET  /review/queue        -> reviewer sees it
+GET  /review/{id}         -> reviewer reads the full package
+POST /review/{id}         -> reviewer accepts / edits (200, released answer in the body)
+                          -> 422 if the reviewed answer cannot be released (still in the queue)
+                          -> or rejects (nothing released)
+GET  /requests/{id}       -> caller polls: "answered" with the released answer, or "rejected"
+```
+
+### 17.13 Which role can call what
+
+| Endpoint | Minimum role |
+|---|---|
+| `GET /health` | none |
+| `GET /auth/me`, `POST /auth/azure`, `POST /ask`, `GET /requests/{id}` | any authenticated role |
+| `GET /review/queue`, `GET /review/{id}`, `POST /review/{id}`, `GET /metrics/slo`, `GET /metrics/optimization` | compliance_officer / legal_reviewer / admin |
+| `POST /ingest`, `GET /ingest/status`, `POST /ingest/rebuild`, `POST /cache/invalidate` | admin |
+
+Note that `/ask` results also depend on role scope beyond authentication: record/SQL questions need
+a role granted the relevant table (store_manager+ for `vendors`; compliance_officer+ for
+`audit_logs` and `retention_records`), and GDPR/ISO documents are only readable by
+compliance_officer and above.
+
+---
+
+## 18. Cost and latency: logging, caching and model routing
+
+Three additions from the Course-4 Sprint-9 material ("optimise agentic systems for cost, latency
+and quality") applied to this graph. Each one is measurable from the outside: the log shows what
+happened per request, `GET /metrics/optimization` shows the totals, and the `/ask` trace shows the
+decision for the request in hand.
+
+### 18.1 Logging that follows a request
+
+`src/observability/logging_config.py` stamps every log line with the id of the HTTP request being
+served, `[req=<uuid>]`, from a context variable that the request-logging middleware in `main.py`
+binds. `/ask` reuses the same id as the graph's `request_id`, so the access line, every node line,
+the audit rows, the Langfuse trace and the `X-Request-ID` response header all agree. A client can
+send its own `X-Request-ID` to correlate a retry. Threads started for the parallel legs of the
+hybrid and panel paths inherit the id through `with_request_context(fn)`.
+
+What gets logged, in order, for one answered question:
+
+```
+http_request_start method=POST path=/ask
+ask START request_id=… user=… role=… use_cache=True
+response cache MISS scope=…
+input guardrail passed pii_redacted=none risk_floor=Medium risk_keywords=['retention period']
+intent=policy_lookup entities=none document_scope=any
+entity vendor='Acme' status=exact resolved_id=17         (one per entity)
+risk fused=Medium scenario=none l1=Medium l2=Low l3_hits=0 disagreement=False
+route intent=policy_lookup proposed=rag chosen=rag clamped=False
+edge planner -> rag reason=budget headroom is sufficient
+policy evidence chunks=6 scope=all best_score=0.81 elapsed_ms=412
+model_route node=rag_generate tier=small deployment=gpt-4o-mini strategy=heuristic reason=…
+llm_call node=rag_generate model=gpt-4o-mini elapsed_ms=1830 tokens[p/c/t]=2100/180/2280 usd=0.000423
+validation PASSED tier=small deterministic=0 llm=0 blocking=none grounded_ratio=1.00
+confidence OK final=0.9000 threshold=0.75 retrieval=0.800 validation=1.000 agreement=1.000 coverage=0.800
+edge confidence_scoring -> respond
+output guardrail RELEASED citation_coverage=1.00 citations=1 pii_removed=none
+ask END outcome=answered path=rag total_ms=4210 llm_calls=5 llm_tokens=5310 usd=0.00091 routing=['rag_generate=small', 'compliance_validation=small']
+response cache STORE request_id=… produced_in_ms=4210
+http_request method=POST path=/ask status=200 elapsed_ms=4216
+```
+
+Refusals, clarifications, budget stops, degraded paths, guardrail rejections and escalations log
+at WARNING with their reason; database, model and mail failures at ERROR with the traceback. The
+noisy third-party loggers (httpx, presidio, llama_index, …) are pinned to WARNING. Startup prints
+one line per operator-relevant setting (secrets are shown only as configured / not configured).
+The old `configs/logger.py`, which used to install its own `basicConfig(force=True)` on import and
+silently replace the rotating file handler, is now a shim over the central configuration.
+
+### 18.2 Caching (`src/cache`)
+
+Three caches at three depths, all process-local, bounded (LRU) and time-limited (TTL), all
+reporting hits, misses and what they saved:
+
+| cache | key | what a hit skips | invalidated when |
+|---|---|---|---|
+| **response** (`response_cache.py`) | access scope (role, scopes, departments, `document_scope`, as-of) + normalised question, or its embedding | the whole graph: every model call and every database read | corpus ingest / rebuild, `POST /cache/invalidate`, TTL (1 h) |
+| **retrieval** (`retrieval_cache.py`) | question + doc types + scope + as-of + top-k/top-n + rerank flag | the embedding call, vector + BM25 search, fusion and the cross-encoder | same, TTL 10 min |
+| **LLM** (`llm_cache.py`) | LangChain prompt + model configuration (deployment, temperature, bound schema) | one model call | same, TTL 1 h |
+
+The response cache is the one that changes the numbers. It only ever stores a *released* answer:
+`status == answered`, confidence at or above the threshold, not degraded, no budget stop, no
+skipped optional node — so a cache hit is a certified answer being certified again, never a
+short-cut past validation. Escalations, refusals and clarifications are never cached, and a
+follow-up that carries conversation history is never looked up, because its meaning depends on
+the thread. Two callers share an entry only when their access scope is identical; a store
+associate cannot be served a compliance officer's answer.
+
+A **semantic** hit embeds the new question with the same deployment the index uses and accepts
+the nearest cached question in the same scope at cosine similarity ≥ `SEMANTIC_CACHE_THRESHOLD`
+(0.95). "What is the retention period for invoices?" and "How long are invoices retained?" hit;
+"Can we share customer data with an overseas vendor?" does not. With Azure unconfigured, or when
+the embedding call fails, the cache degrades to exact match and says so in the log.
+
+A hit is still a request: it gets a fresh `request_id`, an audit row (`response_cache /
+cache_hit` naming the source request), a `request_latency` row with `evidence_path = cache` so
+the SLO report shows the latency it returned, and both conversation turns are recorded so a
+follow-up has history. Each entry remembers the wall-clock and token cost of the run that
+produced it, which is how `saved_ms_total` and `saved_tokens_total` in the report are real numbers
+rather than a hit rate.
+
+The LLM cache is LangChain's global cache slot, filled with a TTL/LRU implementation instead of
+the unbounded `InMemoryCache`. Only temperature-0 models use it; the panel challenger (0.4) and
+the generation nodes (0.1) are built with `cache=False`. A hit shows in the log as
+`llm_call … cached=true` and is booked in the cost ledger as saved rather than spent.
+
+### 18.3 Model routing (`src/llm_routing`)
+
+The Sprint-9 "Gateway Router" pattern: a zero-latency heuristic decides how much reasoning a call
+needs, and the cheap tier serves everything that does not need the strong one. Nodes fall into
+three classes:
+
+- **fixed small** — rewrite, intent, risk classifier, planner, template selector, SQL narration,
+  reflection. Structured-output calls the small model handles; unchanged.
+- **fixed strong** — the four panel agents. A High-risk answer always gets the strongest model;
+  the router never trades that for cost.
+- **routable** — `rag_generate`, `hybrid_generate`, `compliance_validation`, `agentic_rag`. The
+  calls that write or judge the answer, and the expensive ones. Here `MODEL_ROUTING_STRATEGY`
+  decides:
+
+| strategy | routable nodes use |
+|---|---|
+| `heuristic` (default) | `assess_complexity` → small for simple questions, strong for complex |
+| `cost_saver` | small unless the fused risk is High |
+| `quality_first` | strong, never downgraded |
+| `static` | the fixed `TIER_FOR_NODE` table — the previous behaviour |
+
+`assess_complexity` (`complexity.py`) is the reference router's keyword-and-length rule set
+extended with what the graph already knows by the time an answer is generated: risk High →
+complex; a complex trigger phrase (`cross-border`, `legal hold`, `override`, `conflict`, `gift`,
+`hospitality`, `overdue`, `why`, …) → complex; more than `ROUTING_COMPLEX_WORD_COUNT` words →
+complex; a multi-part question → complex; intent `compliance_check` / `incident_guidance` →
+complex; evidence path hybrid / agentic / panel → complex; otherwise simple, with the simple
+triggers (`what is the`, `retention period`, `how many`, `status of`, …) noted. The reasons are
+kept, so the trace says *why* a question was judged complex, not just that it was.
+
+**Latency pressure.** With less than `ROUTING_LATENCY_PRESSURE_SECONDS` of deadline or
+`ROUTING_TOKEN_PRESSURE` tokens left, a routable node drops to the small tier so the request
+finishes inside its SLO instead of escalating on a budget stop. High-risk requests are exempt
+(correctness outranks speed there, and the panel path already carries the widest deadline), and
+`quality_first` never downgrades.
+
+Every decision is a `RoutingDecision` appended to the state's `model_routing` channel, so it is in
+the `/ask` trace, the reviewer package and the log (`model_route node=… tier=… reason=…`).
+
+**Cost ledger** (`ledger.py`, `pricing.py`). The `tokens_spent` channel is a budget *estimate* the
+guard uses before a node runs; the ledger records what the provider actually billed, taken from
+the token usage the logging callback sees on every call, priced from a per-million-token table
+(`MODEL_PRICES_JSON` overrides it). Per request it goes into `trace.llm_usage`; process-wide into
+`GET /metrics/optimization` as spend per model and per tier, the small-tier share, and the
+per-request mean and peak against `COST_BUDGET_USD_PER_REQUEST` (a soft ceiling: exceeding it
+logs a warning and is counted, never blocked). Calls made through llama-index (the agentic path,
+the generated-SQL engine) bypass the LangChain callback and are not in the ledger.
+
+**Gateway.** Set `LLM_GATEWAY_URL` to route both tiers through an OpenAI-compatible proxy —
+`litellm_config.yaml` is the Sprint-9 layout with `simple-agent` / `complex-agent` mapped to the
+two Azure deployments. The backend keeps making the same tier decisions; the gateway changes
+where each tier is served from, so the small tier can be swapped for a local model without a code
+change.
+
+### 18.4 What to expect
+
+For the monthly mix in the brief (30–40 % retention questions, 20–30 % vendor compliance, the rest
+long-tail), the response cache absorbs the repeated questions and the heuristic router sends
+the plain lookups — most retention and status questions — to the small tier. Both effects are
+visible on `GET /metrics/optimization`: `caches.response.hit_rate` and `saved_ms_total`,
+`routing.routable_small_share`, and `cost.by_tier`. Nothing on the high-risk path changes: High
+risk still means the strong tier, the panel, and a human.
+
+Tests: `tests/test_cache.py`, `tests/test_model_routing.py`, `tests/test_request_logging.py` and
+`tests/test_graph_routing_integration.py` (the real graph and real nodes against a fake chat
+model, proving a simple question is generated and validated on the small tier and a complex one
+on the strong tier).
+
+## 19. External MCP tool: DuckDuckGo search for regulation cross-checks
+
+The agentic path already had an MCP client (`src/tools/mcp_tools.py`, section 1) but nothing to
+talk to. It now talks to the open-source **DuckDuckGo MCP server**, which exposes two tools over
+streamable HTTP: `search(query, max_results, region)` and `fetch_content(url, start_index,
+max_length)`. The server itself is built on `httpx`; our side reaches it through
+`llama_index.tools.mcp.BasicMCPClient`, which speaks the MCP JSON-RPC protocol over HTTP.
+
+Why this tool and not a database or filesystem server: `policy_documents` and
+`compliance_records` already cover everything inside the company. The one thing the agent could
+not do was look *outside* — check that the internal privacy policy still matches the current text
+of GDPR Art. 33, or confirm a regulator's notification window. A web tool fills that gap without
+duplicating the guarded SQL layer.
+
+### 19.1 How the pieces connect
+
+```
+duckduckgo-mcp-server (child process, stdio) ────────────────┐
+                                                             │  MCP (JSON-RPC over stdio, or HTTP)
+FastAPI /ask ─► LangGraph ─► agentic_rag_node ─► ReActAgent ─┤
+                                     │                       │
+                        build_tools_for(include_mcp=True)    │
+                                     │                       │
+                          McpToolProvider.load_tools() ◄─────┘
+                          (allow-list, timeout, output clamp)
+```
+
+1. `McpToolProvider` reads `MCP_SERVER_URL`, opens an MCP session, calls `tools/list`, keeps only
+   the names in `MCP_ALLOWED_TOOLS`, and wraps each one so its output is cut at
+   `MCP_MAX_OUTPUT_CHARS` (6 000) — a fetched web page must not blow the token budget.
+2. `registry.build_tools_for` appends those tools after the two internal ones, so the agent sees
+   `[policy_documents, compliance_records, search, fetch_content]`.
+3. The ReAct agent decides per step which tool to call. The system prompt in
+   `src/nodes/agentic_rag.py` restricts the web tools to cross-checks *after* a policy lookup and
+   forces web results to be labelled `[Web: <domain>]`, never presented as a policy clause.
+4. `MCP_REQUIRED=false` keeps the API up when the server is down: the provider logs the failure,
+   returns no tools, and the agent runs with the internal two.
+
+### 19.2 Running it
+
+`BasicMCPClient` accepts either a URL or a command in `MCP_SERVER_URL`. The default is the
+**command form**: the backend spawns the DuckDuckGo server as a child process and talks to it
+over stdio, so there is no second service to run, locally or on Render.
+
+```bash
+uv add duckduckgo-mcp-server          # once; lands in pyproject.toml
+
+uv run python scripts/mcp_smoke.py "GDPR article 33 breach notification 72 hours"
+#   [1/3] 'duckduckgo-mcp-server' is a command, not a URL - the client will spawn it over stdio
+#   [2/3] MCP handshake ok, tools loaded: ['search', 'fetch_content']
+#   [3/3] search(...) returned 2311 chars: ...
+
+uv run uvicorn main:app --reload      # unchanged
+```
+
+`.env`:
+
+```
+MCP_ENABLED=true
+MCP_REQUIRED=false
+MCP_SERVER_URL=duckduckgo-mcp-server
+MCP_ALLOWED_TOOLS=search,fetch_content
+MCP_TIMEOUT_SECONDS=30
+MCP_MAX_OUTPUT_CHARS=6000
+```
+
+Each agentic request spawns a fresh server process (about 0.5–1 s). If that ever matters, run
+it once as a long-lived HTTP service instead and point the URL at it — nothing else changes:
+
+```bash
+uvx duckduckgo-mcp-server --transport streamable-http --port 7070
+# .env: MCP_SERVER_URL=http://127.0.0.1:7070/mcp
+```
+
+On Render (native Python service, no Docker) the command form needs nothing beyond the
+dependency: the build installs it, the start command stays `uvicorn main:app --host 0.0.0.0
+--port $PORT`.
+
+`tests/test_mcp_duckduckgo.py` is a live test: it pings the URL with `httpx`, skips when nothing
+listens, and otherwise asserts the allow-list, the clamp and a real search result.
+
+### 19.3 Seeing it work from Swagger (`http://localhost:8000/docs`)
+
+Only the **agentic** evidence path uses MCP tools, so the request has to land there. The router
+(section 15.2) sends `INCIDENT_GUIDANCE` intents to agentic by default and needs a role that can
+read both documents and records, so use a compliance officer.
+
+1. Log in through the frontend as a user with the `compliance_officer` role and copy the Auth0
+   access token (browser devtools → Network → any `/ask` or `/auth/me` request → `Authorization`
+   header). In Swagger click **Authorize** (top right), paste it, *Authorize*, *Close*.
+2. **`POST /ask`** → *Try it out* → body
+   ```json
+   {
+     "query": "We detected a personal data breach affecting customer records this morning. What does our privacy policy require us to do, and does that still match the current GDPR Article 33 deadline?",
+     "use_cache": false
+   }
+   ```
+   `use_cache: false` forces a graph run instead of a cached answer.
+3. *Execute*. Expect a `200` after 10–40 s (the agentic deadline is 75 s). In the response body:
+   - `evidence_path` is `"agentic"`.
+   - `trace.path_decision` names the intent (`incident_guidance`) and why agentic was chosen.
+   - `trace.reasoning_trace` / the node trace carries
+     `"tools_available": ["policy_documents", "compliance_records", "search", "fetch_content"]`
+     and `tool_calls` ≥ 2 — one internal lookup plus at least one web call.
+   - `answer` cites policy clauses as `[Document Title §clause]` and the external check as
+     `[Web: gdpr-info.eu]` (or whichever domain the search returned).
+   - `citations` lists only the internal clauses; the web result is deliberately not a citation.
+4. Confirm the call happened on the server side: the API log shows
+   `agentic START ... tools=['policy_documents', 'compliance_records', 'search', 'fetch_content']`
+   followed by the ReAct step that called `search`.
+5. Negative test for the demo: set `MCP_SERVER_URL=` (empty) or to a command that does not
+   exist, restart, repeat step 2. The API still returns `200`, `tools_available` shrinks to the
+   two internal tools, and the log shows either `runs without external MCP tools` or
+   `MCP tools could not be loaded` — that is the `MCP_REQUIRED=false` degradation.
+
+A `202 pending_review` on step 3 is not an MCP failure: it means the risk classifier marked the
+breach question high-risk and escalated it. Either lower the risk (ask "does our privacy policy
+match GDPR Article 33's 72-hour deadline?") or approve it via **`GET /review/queue`** →
+**`POST /review/{request_id}`** with `{"decision": "accept"}` and read the answer from
+**`GET /requests/{request_id}`** (section 17.12).

@@ -1,6 +1,6 @@
 [project]
 name = "retail-policy-intelligence"
-version = "4.0.0"
+version = "4.1.0"
 description = "Retail Policy Intelligence & Decision Support System - agentic compliance Q&A over policy documents and operational records"
 requires-python = ">=3.12"
 
@@ -43,6 +43,10 @@ dependencies = [
     "langfuse>=2.53.0",
     "tenacity>=9.0.0",
     "llama-index-readers-file>=0.7.0",
+    "ruff>=0.16.6",
+    "duckduckgo-mcp-server>=0.7.0",
+    "python-jose[cryptography]>=3.5.0",
+    "requests>=2.32.0",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +54,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
 ]
 
@@ -83,13 +88,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG001", "ARG002"]
+"tests/*" = ["ARG001", "ARG002", "ARG005"]
 "scripts/*" = ["T201"]
 "evals/*" = ["T201"]
 "generate_capstone_sql_data.py" = ["T201"]
 "src/api/routes.py" = ["ARG001"]
 "main.py" = ["ARG001"]
 "src/retrieval/postprocessors.py" = ["ARG002"]
+"src/observability/callbacks.py" = ["ARG002"]
 "src/ingestion/extractors/figure_detection.py" = ["RUF005"]
 "src/ingestion/extractors/image_extraction.py" = ["RUF005"]
 "src/ingestion/extractors/table_extraction.py" = ["RUF005"]
@@ -100,3 +106,35 @@ known-first-party = ["configs", "src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Coverage is opt-in: `pytest --cov` (or `pytest --cov --cov-fail-under=70`).
+# Modules that only wrap an external process (Postgres, Azure, LlamaParse,
+# Presidio, the startup data generator) are excluded from the denominator so
+# the number reflects logic that a unit test can reach.
+[tool.coverage.run]
+source = ["src", "configs"]
+branch = true
+omit = [
+    "src/tests/*",
+    "src/startup/*",
+    "src/schemas.py",
+    "src/database.py",
+    "src/callbacks.py",
+    "configs/database.py",
+    "configs/llms.py",
+    "configs/logger.py",
+    "src/index/vector_index.py",
+    "src/retrieval/vector_store.py",
+    "src/ingestion/loaders/llamaparse_loader.py",
+    "src/ingestion/processors/image_captioning.py",
+    "src/observability/langfuse_callback.py",
+]
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "except ImportError",
+]

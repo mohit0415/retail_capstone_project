@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 
 import psycopg2
 
-# ---------- CONFIG ----------
 DB_CONFIG = {
     "dbname": "retail_compliance_db",
     "user": "your_user",
@@ -18,7 +17,6 @@ NUM_RETENTION = 60
 NUM_REVIEWS = 60
 
 random.seed(42)
-# ----------------------------
 
 def random_date(start_year=2023, end_year=2026):
     start = datetime(start_year, 1, 1)
@@ -49,7 +47,6 @@ def main():
 
     vendor_ids = []
 
-    # -------- Vendors --------
     for i in range(NUM_VENDORS):
         score = random.randint(40, 95)
         category = risk_category(score)
@@ -73,7 +70,6 @@ def main():
 
         vendor_ids.append(cur.fetchone()[0])
 
-    # -------- Audit Logs --------
     for vid in vendor_ids:
         for _ in range(AUDITS_PER_VENDOR):
             score = random.randint(40, 95)
@@ -113,7 +109,6 @@ def main():
                 escalation
             ))
 
-    # -------- Retention Records --------
     for _ in range(NUM_RETENTION):
         cur.execute("""
             INSERT INTO retention_records
@@ -138,7 +133,6 @@ def main():
             random_date(2025, 2026)
         ))
 
-    # -------- Compliance Reviews --------
     for _ in range(NUM_REVIEWS):
         cur.execute("""
             INSERT INTO compliance_reviews

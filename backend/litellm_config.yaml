@@ -1,0 +1,42 @@
+# Optional LiteLLM gateway in front of the two model tiers - the Sprint-9
+# "Gateway Router" layout applied to this project.
+#
+# Run it with:
+#   litellm --config litellm_config.yaml --port 4000
+# then point the backend at it:
+#   LLM_GATEWAY_URL=http://localhost:4000/v1
+#   LLM_GATEWAY_SMALL_MODEL=simple-agent
+#   LLM_GATEWAY_STRONG_MODEL=complex-agent
+#
+# The backend keeps making the same tier decisions (src/llm_routing/router.py);
+# the gateway only changes *where* each tier is served from, so the small
+# tier can be swapped for a local Ollama model (zero cost) without touching
+# application code, and every call shows up in the LiteLLM logs with its
+# cost. Leave LLM_GATEWAY_URL empty to call Azure OpenAI directly.
+
+model_list:
+  # Small tier: classification, rewriting, template selection, narration,
+  # and the routable generation nodes when the heuristic router judges the
+  # question simple. Swap the litellm_params for `ollama/llama3.2` +
+  # `api_base: http://localhost:11434` to serve this tier locally.
+  - model_name: simple-agent
+    litellm_params:
+      model: azure/gpt-4o-mini
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_version: os.environ/AZURE_OPENAI_API_VERSION
+
+  # Strong tier: the high-risk panel agents, and the routable generation
+  # nodes for complex questions.
+  - model_name: complex-agent
+    litellm_params:
+      model: azure/gpt-4o
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_version: os.environ/AZURE_OPENAI_API_VERSION
+
+litellm_settings:
+  # LiteLLM's own response cache is left off: the backend already caches at
+  # the answer, retrieval and completion levels with corpus-aware invalidation.
+  cache: false
+  drop_params: true

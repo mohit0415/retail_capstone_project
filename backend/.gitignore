@@ -9,5 +9,4 @@ data/policies/*.md
 !data/policies/README.md
 *.log
 .DS_Store
-.env.*
-!.env.example
+AUTH0_ENV_SNIPPET.txt

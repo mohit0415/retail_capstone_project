@@ -1,0 +1,41 @@
+# Local-only provider map for the two model tiers.
+#
+# Read ONLY when USE_MODEL_ROUTING_YAML=true AND APP_ENV=local. In any
+# deployment the flag is false (or forced off by APP_ENV), this file is never
+# opened, and both tiers are served by Azure OpenAI from the AZURE_OPENAI_*
+# settings. Tier decisions (which node gets small/strong) still come from
+# configs/llms.py::TIER_FOR_NODE and src/llm_routing/router.py; this file only
+# says *where* each tier is served from.
+#
+# provider: azure   -> AzureChatOpenAI; only `model` (the Azure deployment
+#                      name) is needed. Endpoint, key and api_version are taken
+#                      from AZURE_OPENAI_* in .env; add `endpoint:` / `api_key:` /
+#                      `api_version:` here only to point one tier at a different
+#                      Azure resource.
+# provider: ollama  -> ChatOpenAI against Ollama's OpenAI-compatible endpoint.
+#                      `model` is the Ollama tag (ollama pull llama3.2).
+# provider: openai  -> ChatOpenAI against any OpenAI-compatible base_url
+#                      (LM Studio, vLLM, a LiteLLM proxy, or api.openai.com).
+#
+# Both `api_key` and `base_url` accept "env:VAR_NAME" to read from the
+# environment instead of committing secrets here.
+
+tiers:
+  small:
+    provider: ollama
+    model: llama3.2:latest
+    base_url: http://localhost:11434/v1
+    api_key: ollama            # Ollama ignores it, but the client requires one
+    timeout: 60
+    max_retries: 1
+
+  strong:
+    provider: azure
+    model: gpt-4o-mini         # Azure deployment name; endpoint/key/api_version come from .env
+    timeout: 30
+    max_retries: 2
+
+# Example: everything local, zero cost
+# tiers:
+#   small:  {provider: ollama, model: llama3.2,  base_url: http://localhost:11434/v1, api_key: ollama}
+#   strong: {provider: ollama, model: qwen2.5:14b, base_url: http://localhost:11434/v1, api_key: ollama}
