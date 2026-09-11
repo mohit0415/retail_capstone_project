@@ -113,9 +113,9 @@ def show_status(base_url: str, token: str) -> None:
     for document in documents:
         print(
             f"{str(document.get('document_title'))[:44]:46} "
-            f"{str(document.get('doc_type')):20} "
-            f"{str(document.get('version')):6} "
-            f"{str(document.get('parsed_with')):11} "
+            f"{document.get('doc_type')!s:20} "
+            f"{document.get('version')!s:6} "
+            f"{document.get('parsed_with')!s:11} "
             f"{document.get('node_count')}"
         )
 

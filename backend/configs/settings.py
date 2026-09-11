@@ -2,7 +2,7 @@ import logging
 from datetime import date
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -16,12 +16,17 @@ MINIMUM_DEADLINES = {
 
 MINIMUM_TOKEN_BUDGET = 16000
 
+VALID_ROUTING_STRATEGIES = frozenset({"static", "heuristic", "cost_saver", "quality_first"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "local"
     log_level: str = "INFO"
+    log_file: str = "logs/rpids.log"
+    log_file_max_bytes: int = 10 * 1024 * 1024
+    log_file_backup_count: int = 5
 
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""
@@ -56,6 +61,8 @@ class Settings(BaseSettings):
     flashrank_cache_dir: str = ""
     enable_citation_synthesis: bool = False
 
+    # the v4 workflow (rag -> nl2sql -> multi-agent panel -> compliance validation) has no agentic
+    # route and no intent admits one; kept so existing .env files still parse
     enable_agentic_path: bool = True
     agent_max_iterations: int = 8
     agentic_min_seconds: float = 3.0
@@ -72,6 +79,7 @@ class Settings(BaseSettings):
     pii_entities: str = ""
 
     escalation_email_enabled: bool = False
+    escalation_email_min_risk: str = "High"
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -88,13 +96,35 @@ class Settings(BaseSettings):
     sql_row_limit: int = 200
     enable_generated_sql_fallback: bool = True
 
-    jwt_secret: str = "change-this-to-a-long-random-string"
-    jwt_algorithm: str = "HS256"
-    jwt_expiry_minutes: int = 60
+    # Auth0 (same variable names as the practice-1 travel planner backend).
+    # The frontend .env carries the matching VITE_AUTH0_* values.
+    auth0_domain: str = ""
+    api_audience: str = ""
+    algorithms: str = "RS256"
+    auth0_role_namespace: str = "https://stateful-agent.com"
 
     confidence_threshold: float = 0.75
     max_reflection_retries: int = 2
     panel_repair_passes: int = 1
+
+    # ---- latency controls ----
+    # one model call on a slow Azure deployment can hang; fail it after this many seconds and retry
+    llm_timeout_seconds: float = 20.0
+    llm_max_retries: int = 2
+    # a repair pass (reflection -> plan -> evidence -> validation) needs at least this much deadline left
+    repair_headroom_seconds: float = 8.0
+    # a RAG repair re-asks the same documents, so one attempt is enough (hybrid/agentic keep MAX_REFLECTION_RETRIES)
+    rag_repair_attempts: int = 1
+    # a records repair keeps the rows and rewrites the answer once with the validator's defects
+    sql_repair_attempts: int = 1
+    # a drafted answer may still be validated this many seconds after the deadline instead of escalating
+    validation_grace_seconds: float = 15.0
+    # run the intent classifier and the risk classifier at the same time
+    parallel_intent_and_risk: bool = True
+    # do not ask the planner LLM when only one evidence path is possible anyway
+    skip_planner_for_single_path: bool = True
+    # do not ask the rewrite LLM when a follow-up already reads as a full question
+    skip_rewrite_for_standalone: bool = True
     default_token_budget: int = 16000
     deadline_seconds_standard: float = 30.0
     deadline_seconds_hybrid: float = 45.0
@@ -123,11 +153,39 @@ class Settings(BaseSettings):
 
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
-    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias=AliasChoices("LANGFUSE_HOST", "LANGFUSE_BASE_URL", "langfuse_host"),
+    )
     tracing_enabled: bool = False
 
     rate_limit_standard: str = "30/minute"
     rate_limit_high_risk: str = "10/minute"
+
+    enable_response_cache: bool = True
+    response_cache_ttl_seconds: int = 3600
+    response_cache_max_entries: int = 500
+    enable_semantic_cache: bool = True
+    semantic_cache_threshold: float = 0.95
+    enable_llm_cache: bool = True
+    llm_cache_ttl_seconds: int = 3600
+    llm_cache_max_entries: int = 2000
+    enable_retrieval_cache: bool = True
+    retrieval_cache_ttl_seconds: int = 600
+    retrieval_cache_max_entries: int = 500
+
+    model_routing_strategy: str = "heuristic"
+    routing_complex_word_count: int = 50
+    routing_latency_pressure_seconds: float = 8.0
+    routing_token_pressure: int = 6000
+    llm_gateway_url: str = ""
+    llm_gateway_api_key: str = "dummy-key"
+    llm_gateway_small_model: str = "simple-agent"
+    llm_gateway_strong_model: str = "complex-agent"
+    use_model_routing_yaml: bool = False
+    model_routing_yaml_path: str = "configs/model_routing.yaml"
+    model_prices_json: str = ""
+    cost_budget_usd_per_request: float = 0.05
 
     @model_validator(mode="after")
     def _raise_unworkable_budgets(self):
@@ -151,6 +209,32 @@ class Settings(BaseSettings):
                 "Fix these in .env rather than relying on this floor",
                 ", ".join(raised),
             )
+
+        strategy = (self.model_routing_strategy or "heuristic").strip().lower()
+
+        if strategy not in VALID_ROUTING_STRATEGIES:
+            logger.warning(
+                "MODEL_ROUTING_STRATEGY=%r is not one of %s; using 'heuristic'",
+                self.model_routing_strategy,
+                sorted(VALID_ROUTING_STRATEGIES),
+            )
+            strategy = "heuristic"
+
+        object.__setattr__(self, "model_routing_strategy", strategy)
+
+        if self.use_model_routing_yaml and self.app_env.strip().lower() != "local":
+            logger.warning(
+                "USE_MODEL_ROUTING_YAML=true ignored because APP_ENV=%r is not 'local'; "
+                "every tier is served by Azure OpenAI",
+                self.app_env,
+            )
+            object.__setattr__(self, "use_model_routing_yaml", False)
+
+        if not 0.0 < self.semantic_cache_threshold <= 1.0:
+            logger.warning(
+                "SEMANTIC_CACHE_THRESHOLD=%s is outside (0, 1]; using 0.95", self.semantic_cache_threshold
+            )
+            object.__setattr__(self, "semantic_cache_threshold", 0.95)
 
         return self
 

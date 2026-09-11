@@ -14,7 +14,7 @@ from src.ingestion.router import choose_route
 
 
 def picture_counts(path: Path) -> tuple[int, int, int]:
-    pymupdf, document = open_pdf(str(path))
+    _pymupdf, document = open_pdf(str(path))
 
     if document is None:
         return -1, -1, -1
@@ -62,7 +62,7 @@ def inspect(path: Path, show_chars: int) -> None:
 
     parsed = load_document(str(path))
     sections = extract_clauses(parsed.text)
-    tables, reduced = extract_tables(sections)
+    tables, _reduced = extract_tables(sections)
 
     print(f"  parsed_with      {parsed.route.parser}")
     print(f"  parse_reason     {parsed.route.reason}")

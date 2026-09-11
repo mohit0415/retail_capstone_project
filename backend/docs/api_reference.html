@@ -444,7 +444,8 @@ ul.tight li b { color: var(--ink); font-weight: 600; }
     </div>
     <div class="rail-group">
       <p class="rail-title">auth</p>
-      <a href="#post-auth-token"><span class="m">POST</span>/auth/token</a>
+      <a href="#get-auth-me"><span class="m">GET</span>/auth/me</a>
+      <a href="#post-auth-azure"><span class="m">POST</span>/auth/azure</a>
     </div>
     <div class="rail-group">
       <p class="rail-title">ask</p>
@@ -480,7 +481,7 @@ ul.tight li b { color: var(--ink); font-weight: 600; }
     <section id="auth-model">
       <h2>Authentication</h2>
       <hr class="section-rule">
-      <p class="lede">Every endpoint except <code>POST /auth/token</code> and <code>GET /health</code> needs
+      <p class="lede">Every endpoint except <code>GET /health</code> needs an <b>Auth0</b> access token (RS256, validated against the tenant JWKS; roles come from the <code>https://stateful-agent.com/roles</code> claim) and
         <code>Authorization: Bearer &lt;token&gt;</code>. The token is a JWT signed with <code>JWT_SECRET</code>,
         valid for <code>JWT_EXPIRY_MINUTES</code> (60 by default).</p>
 
@@ -529,7 +530,8 @@ ul.tight li b { color: var(--ink); font-weight: 600; }
             </tr>
           </thead>
           <tbody>
-            <tr><td class="mono">POST /auth/token</td><td class="yes">open</td><td class="yes">open</td><td class="yes">open</td><td class="yes">open</td><td class="yes">open</td></tr>
+            <tr><td class="mono">GET /auth/me</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+            <tr><td class="mono">POST /auth/azure</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
             <tr><td class="mono">POST /ask</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
             <tr><td class="mono">GET /requests/{id}</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
             <tr><td class="mono">GET /review/queue</td><td class="no">403</td><td class="no">403</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
@@ -551,43 +553,79 @@ ul.tight li b { color: var(--ink); font-weight: 600; }
         reach all <span class="tnum">17</span>.</p>
     </section>
 
-    <!-- ================= POST /auth/token ================= -->
-    <section class="endpoint" id="post-auth-token">
+    <!-- ================= GET /auth/me ================= -->
+    <section class="endpoint" id="get-auth-me">
       <div class="ep-head">
-        <span class="method post">POST</span>
-        <span class="path">/auth/token</span>
-        <span class="auth-chip open">no auth</span>
+        <span class="method get">GET</span>
+        <span class="path">/auth/me</span>
+        <span class="auth-chip">any role</span>
       </div>
-      <p class="purpose">Mints a bearer token for a role. There is no password check — this is a development
-        issuer, and anyone who can reach it can mint an admin token.</p>
-
-      <h3>Request body</h3>
-      <div class="spec">
-        <div>user_id<span class="req">required · string</span></div>
-        <div>Becomes the <code>sub</code> claim, and the author on every audit row and review decision.</div>
-        <div>role<span class="req">required · enum</span></div>
-        <div><code>store_associate</code> · <code>store_manager</code> · <code>compliance_officer</code> ·
-          <code>legal_reviewer</code> · <code>admin</code></div>
-        <div>departments<span class="opt">optional · string[]</span></div>
-        <div>Narrows <code>retention_records</code> rows for the department-restricted roles. Rows removed this
-          way are counted and must be disclosed in the answer. Defaults to <code>[]</code>.</div>
-      </div>
-
-      <h3>Example</h3>
-      <pre>curl -s -X POST http://localhost:8000/auth/token \
-  -H <span class="k">'Content-Type: application/json'</span> \
-  -d <span class="k">'{"user_id":"mohit","role":"compliance_officer","departments":["Finance"]}'</span></pre>
+      <p class="purpose">What the Auth0 token resolved to on the backend. Tokens are minted by Auth0 (Universal Login in the
+        React frontend), never here: <code>src/auth/security.py</code> checks signature, audience, issuer and expiry
+        against the tenant JWKS, then maps the roles claim onto the five backend roles (the most privileged wins,
+        <code>user</code> from practice-1 maps to <code>store_associate</code>, no recognised role is a <code>403</code>).</p>
 
       <h3>Responses</h3>
       <div class="statuses">
         <div class="status-row">
           <span class="code-badge ok">200</span>
-          <span class="what"><b>TokenResponse</b> — <code>access_token</code>, <code>token_type: "bearer"</code>,
-            <code>expires_in</code> in seconds (3600 by default).</span>
+          <span class="what"><b>MeResponse</b> — <code>user_id</code> (the <code>sub</code> claim), <code>role</code>,
+            <code>departments</code>, <code>access_scopes</code> (<code>doc:*</code>, <code>table:*</code>, <code>risk:*</code>),
+            <code>auth0_roles</code>, <code>permissions</code> flags, <code>screens</code> the frontend may open and
+            <code>azure_configured</code>.</span>
+        </div>
+        <div class="status-row">
+          <span class="code-badge">401</span>
+          <span class="what">Missing, expired, wrong-audience or badly signed token.</span>
+        </div>
+        <div class="status-row">
+          <span class="code-badge">403</span>
+          <span class="what">Valid token, but none of the Auth0 roles is one of the five backend roles.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= POST /auth/azure ================= -->
+    <section class="endpoint" id="post-auth-azure">
+      <div class="ep-head">
+        <span class="method post">POST</span>
+        <span class="path">/auth/azure</span>
+        <span class="auth-chip">any role</span>
+      </div>
+      <p class="purpose">Applies the Azure OpenAI credentials the user typed on the frontend login page. They are never
+        stored in a frontend <code>.env</code>; the frontend sends them once after the Auth0 login.</p>
+
+      <h3>Request body</h3>
+      <div class="spec">
+        <div>endpoint<span class="req">required · string</span></div>
+        <div><code>https://&lt;resource&gt;.openai.azure.com/</code></div>
+        <div>api_key<span class="req">required · string</span></div>
+        <div>The Azure OpenAI key.</div>
+        <div>api_version, small_deployment, strong_deployment, embedding_deployment<span class="opt">optional</span></div>
+        <div>Default <code>2024-10-21</code>, <code>gpt-4o-mini</code>, <code>gpt-4o</code>, <code>text-embedding-3-small</code>.</div>
+        <div>verify<span class="opt">optional · bool</span></div>
+        <div>Default <code>true</code>: one tiny embedding call and one tiny chat call are made before the values are applied.</div>
+      </div>
+
+      <h3>Example</h3>
+      <pre>curl -s -X POST http://localhost:8000/auth/azure \
+  -H <span class="k">'Authorization: Bearer $TOKEN'</span> -H <span class="k">'Content-Type: application/json'</span> \
+  -d <span class="k">'{"endpoint":"https://demo.openai.azure.com/","api_key":"...","small_deployment":"gpt-4o-mini"}'</span></pre>
+
+      <h3>Responses</h3>
+      <div class="statuses">
+        <div class="status-row">
+          <span class="code-badge ok">200</span>
+          <span class="what"><b>AzureCredentialsResponse</b> — <code>azure_configured</code>, <code>verified</code>, the endpoint host and
+            deployment names now in use.</span>
+        </div>
+        <div class="status-row">
+          <span class="code-badge">400</span>
+          <span class="what">Verification failed — the detail names the deployment that rejected the key.</span>
         </div>
         <div class="status-row">
           <span class="code-badge">422</span>
-          <span class="what">Pydantic rejected the body — most often a <code>role</code> outside the five above.</span>
+          <span class="what">Endpoint not <code>https://</code> or a required field missing.</span>
         </div>
       </div>
     </section>
@@ -1071,10 +1109,10 @@ app.add_middleware(SlowAPIMiddleware)</pre>
       <p><code>allow_origins=["*"]</code> together with <code>allow_credentials=True</code>. Fine on localhost,
         wrong anywhere else.</p>
 
-      <h3><code>/auth/token</code> has no authentication</h3>
-      <p>Anyone who can reach the port can mint an <code>admin</code> token and call
-        <code>/ingest/rebuild</code>. It is a development issuer; put a real identity provider in front of it
-        before this leaves your machine.</p>
+      <h3><code>/auth/azure</code> is process-wide</h3>
+      <p>Any authenticated role can call it and the credentials apply to every request the process serves from
+        then on. That matches the login-page flow (every user types them), but it means one user's key is used
+        for everyone until the next call.</p>
 
       <h3>The <code>poll_url</code> only works for escalations</h3>
       <p>Covered above under <code>GET /requests/{id}</code>, and worth repeating because it looks like a
