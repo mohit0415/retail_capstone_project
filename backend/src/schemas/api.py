@@ -171,8 +171,17 @@ class AzureCredentialsRequest(BaseModel):
     api_key: str = Field(min_length=8)
     api_version: str = "2024-10-21"
     small_deployment: str = "gpt-4o-mini"
-    strong_deployment: str = "gpt-4o"
-    embedding_deployment: str = "text-embedding-3-small"
+    strong_deployment: str = "gpt-4o-mini"
+    embedding_deployment: str = "text-embedding-3-large"
+    embedding_dimensions: int | None = Field(
+        default=None,
+        ge=1,
+        description="vector width; derived from embedding_deployment when omitted (3-large=3072, 3-small=1536)",
+    )
+    llamaparse_api_key: str = Field(
+        default="",
+        description="LlamaCloud key for table/diagram parsing. Blank keeps whatever the server .env had.",
+    )
     verify: bool = True
 
 
@@ -184,6 +193,10 @@ class AzureCredentialsResponse(BaseModel):
     small_deployment: str = ""
     strong_deployment: str = ""
     embedding_deployment: str = ""
+    embedding_dimensions: int = 0
+    llamaparse_configured: bool = False
+    llamaparse_source: str = "none"
+    warning: str = ""
     message: str = ""
 
 

@@ -32,9 +32,9 @@ class Settings(BaseSettings):
     azure_openai_api_key: str = ""
     azure_openai_api_version: str = "2024-10-21"
     azure_openai_small_deployment: str = "gpt-4o-mini"
-    azure_openai_strong_deployment: str = "gpt-4o"
+    azure_openai_strong_deployment: str = "gpt-4o-mini"
     azure_openai_embedding_deployment: str = "text-embedding-3-small"
-    azure_openai_vision_deployment: str = "gpt-4o"
+    azure_openai_vision_deployment: str = "gpt-4o-mini"
     embedding_dimensions: int = 1536
 
     llamaparse_api_key: str = ""

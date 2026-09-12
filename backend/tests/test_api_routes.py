@@ -284,17 +284,26 @@ def test_when_auth0_is_not_configured_every_protected_call_is_503(client, auth, 
 def test_azure_credentials_from_the_login_page_are_applied_after_verification(client, auth, monkeypatch):
     probes = []
 
-    def _verify(endpoint, api_key, api_version, small, embedding):
-        probes.append((endpoint, api_key, api_version, small, embedding))
+    def _verify(endpoint, api_key, api_version, small, embedding, dimensions=None):
+        probes.append((endpoint, api_key, api_version, small, embedding, dimensions))
 
         return True, "ok"
 
     applied = {}
 
-    def _apply(endpoint, api_key, api_version, small, strong, embedding):
-        applied.update(endpoint=endpoint, api_key=api_key, small=small, strong=strong, embedding=embedding)
+    def _apply(endpoint, api_key, api_version, small, strong, embedding, dimensions=None, llamaparse=""):
+        applied.update(
+            endpoint=endpoint,
+            api_key=api_key,
+            small=small,
+            strong=strong,
+            embedding=embedding,
+            dimensions=dimensions,
+            llamaparse=llamaparse,
+        )
         monkeypatch.setattr(settings, "azure_openai_endpoint", endpoint)
         monkeypatch.setattr(settings, "azure_openai_api_key", api_key)
+        monkeypatch.setattr(settings, "embedding_dimensions", dimensions)
 
     monkeypatch.setattr(azure_credentials, "verify_azure_credentials", _verify)
     monkeypatch.setattr(azure_credentials, "apply_azure_credentials", _apply)
@@ -310,11 +319,119 @@ def test_azure_credentials_from_the_login_page_are_applied_after_verification(cl
     assert body["azure_configured"] is True
     assert body["verified"] is True
     assert body["endpoint"] == "demo.openai.azure.com"
-    assert probes == [("https://demo.openai.azure.com/", "sk-test-1234", "2024-10-21", "gpt-4o-mini", "text-embedding-3-small")]
+    assert probes == [
+        ("https://demo.openai.azure.com/", "sk-test-1234", "2024-10-21", "gpt-4o-mini", "text-embedding-3-large", 3072)
+    ]
     assert applied["strong"] == "gpt-4o"
+    # the vector width came from the embedding deployment name, not from the .env value
+    assert applied["dimensions"] == 3072
+    assert body["embedding_dimensions"] == 3072
 
     assert client.get("/auth/me", headers=auth()).json()["azure_configured"] is True
     assert client.get("/health").json()["azure_configured"] is True
+
+
+def _restore_live_settings(monkeypatch):
+    """apply_azure_credentials writes straight into the global settings, so every
+    field it touches is registered for restore before a test lets it run."""
+    for field in (
+        "azure_openai_endpoint",
+        "azure_openai_api_key",
+        "azure_openai_api_version",
+        "azure_openai_small_deployment",
+        "azure_openai_strong_deployment",
+        "azure_openai_embedding_deployment",
+        "embedding_dimensions",
+        "llamaparse_api_key",
+    ):
+        monkeypatch.setattr(settings, field, getattr(settings, field))
+
+
+def test_the_embedding_choice_sets_the_vector_width_and_the_llamaparse_key(client, auth, monkeypatch):
+    """3-small on the login page must re-dimension the embedder to 1536 in the same step."""
+    _restore_live_settings(monkeypatch)
+    monkeypatch.setattr(settings, "embedding_dimensions", 3072)
+    monkeypatch.setattr(settings, "llamaparse_api_key", "llx-server-own-key")
+    monkeypatch.setattr(azure_credentials, "_llamaparse_source", "env")
+    monkeypatch.setattr(azure_credentials, "_clear_model_caches", lambda: None)
+    monkeypatch.setattr(azure_credentials, "verify_azure_credentials", lambda *a, **k: (True, "ok"))
+
+    response = client.post(
+        "/auth/azure",
+        json={
+            "endpoint": "https://demo.openai.azure.com/",
+            "api_key": "sk-test-1234",
+            "embedding_deployment": "text-embedding-3-small",
+            "llamaparse_api_key": "llx-the-users-own-key",
+        },
+        headers=auth(Role.STORE_ASSOCIATE),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["embedding_deployment"] == "text-embedding-3-small"
+    assert body["embedding_dimensions"] == 1536
+    assert settings.embedding_dimensions == 1536
+    # the key typed on the login page is billed, not the one in the server .env
+    assert settings.llamaparse_api_key == "llx-the-users-own-key"
+    assert body["llamaparse_configured"] is True
+    assert body["llamaparse_source"] == "login"
+    # never echo the key itself
+    assert "llx-the-users-own-key" not in response.text
+
+
+def test_a_blank_llamaparse_key_leaves_the_server_key_alone(client, auth, monkeypatch):
+    _restore_live_settings(monkeypatch)
+    monkeypatch.setattr(settings, "llamaparse_api_key", "llx-server-own-key")
+    monkeypatch.setattr(azure_credentials, "_llamaparse_source", "env")
+    monkeypatch.setattr(azure_credentials, "_clear_model_caches", lambda: None)
+    monkeypatch.setattr(azure_credentials, "verify_azure_credentials", lambda *a, **k: (True, "ok"))
+
+    response = client.post(
+        "/auth/azure",
+        json={"endpoint": "https://demo.openai.azure.com/", "api_key": "sk-test-1234"},
+        headers=auth(Role.STORE_ASSOCIATE),
+    )
+
+    assert response.status_code == 200, response.text
+    assert settings.llamaparse_api_key == "llx-server-own-key"
+    assert response.json()["llamaparse_source"] == "env"
+
+
+def test_an_embedding_that_does_not_fit_the_ingested_corpus_is_warned_about(client, auth, monkeypatch):
+    from src.index import vector_index
+
+    _restore_live_settings(monkeypatch)
+    monkeypatch.setattr(vector_index, "table_embedding_dimensions", lambda: 3072)
+    monkeypatch.setattr(azure_credentials, "_clear_model_caches", lambda: None)
+    monkeypatch.setattr(azure_credentials, "verify_azure_credentials", lambda *a, **k: (True, "ok"))
+
+    response = client.post(
+        "/auth/azure",
+        json={
+            "endpoint": "https://demo.openai.azure.com/",
+            "api_key": "sk-test-1234",
+            "embedding_deployment": "text-embedding-3-small",
+        },
+        headers=auth(Role.STORE_ASSOCIATE),
+    )
+
+    assert response.status_code == 200, response.text
+    warning = response.json()["warning"]
+    assert "3072" in warning and "1536" in warning
+
+    # the matching model is not warned about
+    ok = client.post(
+        "/auth/azure",
+        json={
+            "endpoint": "https://demo.openai.azure.com/",
+            "api_key": "sk-test-1234",
+            "embedding_deployment": "text-embedding-3-large",
+        },
+        headers=auth(Role.STORE_ASSOCIATE),
+    )
+
+    assert ok.json()["warning"] == ""
 
 
 def test_rejected_azure_credentials_are_a_400_and_nothing_is_applied(client, auth, monkeypatch):

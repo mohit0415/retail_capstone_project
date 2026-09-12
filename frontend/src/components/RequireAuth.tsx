@@ -92,5 +92,17 @@ export default function RequireAuth({ children }: { children: ReactNode }) {
     )
   }
 
-  return <>{children}</>
+  return (
+    <>
+      {auth.backendWarning && (
+        <div className="alert warn" style={{ margin: '8px 12px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+          <span style={{ flex: 1 }}>{auth.backendWarning}</span>
+          <button className="btn sm ghost" onClick={auth.dismissBackendWarning}>
+            dismiss
+          </button>
+        </div>
+      )}
+      {children}
+    </>
+  )
 }

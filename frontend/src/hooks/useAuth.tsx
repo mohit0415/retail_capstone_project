@@ -59,6 +59,9 @@ export interface AuthState {
   backendError: string
   tokenCheck: TokenCheck | null
   connectBackend: () => Promise<void>
+  // non-fatal notice from POST /auth/azure (e.g. the embedding width no longer fits the corpus)
+  backendWarning: string
+  dismissBackendWarning: () => void
   refreshSession: () => Promise<void>
   hasScreen: (screen: Screen) => boolean
   isAdmin: boolean
@@ -80,6 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<MeResponse | null>(null)
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('idle')
   const [backendError, setBackendError] = useState('')
+  const [backendWarning, setBackendWarning] = useState('')
   const [tokenCheck, setTokenCheck] = useState<TokenCheck | null>(null)
   const connecting = useRef(false)
 
@@ -92,6 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const getToken = useCallback(async () => {
     // Task 3 - Get access token silently
     const token = await getAccessTokenSilently()
+    console.log('access token (silent):', token)
     return token
   }, [getAccessTokenSilently])
 
@@ -142,6 +147,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     connecting.current = true
     setBackendStatus('connecting')
     setBackendError('')
+    setBackendWarning('')
 
     try {
       const token = await getToken()
@@ -150,7 +156,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (creds) {
         console.log('sending azure credentials to backend...')
-        await sendAzureCredentials(token, creds, true)
+        const applied = await sendAzureCredentials(token, creds, true)
+        console.log(
+          'azure applied:', applied.small_deployment, '/', applied.strong_deployment,
+          '| embedding', applied.embedding_deployment, `(${applied.embedding_dimensions} dims)`,
+          '| llamaparse', applied.llamaparse_source,
+        )
+        setBackendWarning(applied.warning || '')
       }
 
       const profile = await getMe(token)
@@ -185,8 +197,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshSession = useCallback(async () => {
     setBackendStatus('connecting')
     setBackendError('')
+    setBackendWarning('')
     try {
-      await getAccessTokenSilently({ cacheMode: 'off', timeoutInSeconds: 10 })
+      console.log(
+        'access token (forced refresh):',
+        await getAccessTokenSilently({ cacheMode: 'off', timeoutInSeconds: 10 }),
+      )
     } catch (err) {
       console.log('silent token refresh failed, doing a full login instead', err)
       await loginWithRedirect({
@@ -221,6 +237,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     backendError,
     tokenCheck,
     connectBackend,
+    backendWarning,
+    dismissBackendWarning: () => setBackendWarning(''),
     refreshSession,
     hasScreen,
     isAdmin: me?.role === 'admin' || tokenRoles.includes('admin'),

@@ -8,7 +8,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { DEFAULT_AZURE, loadAzureCreds, maskKey, saveAzureCreds } from '../azureCreds'
+import { DEFAULT_AZURE, EMBEDDING_CHOICES, dimensionsFor, loadAzureCreds, maskKey, saveAzureCreds } from '../azureCreds'
 import { getHealth } from '../apiService'
 import type { AzureCredentials, HealthResponse } from '../types'
 
@@ -20,6 +20,7 @@ export default function LoginPage() {
   const saved = loadAzureCreds()
   const [creds, setCreds] = useState<AzureCredentials>(saved || DEFAULT_AZURE)
   const [showKey, setShowKey] = useState(false)
+  const [showParseKey, setShowParseKey] = useState(false)
   const [error, setError] = useState(state.error || '')
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [healthErr, setHealthErr] = useState('')
@@ -59,13 +60,17 @@ export default function LoginPage() {
     setError('')
     setSubmitting(true)
 
+    const embedding = creds.embedding_deployment.trim()
     const clean: AzureCredentials = {
       endpoint: creds.endpoint.trim(),
       api_key: creds.api_key.trim(),
       api_version: creds.api_version.trim() || DEFAULT_AZURE.api_version,
       small_deployment: creds.small_deployment.trim(),
       strong_deployment: creds.strong_deployment.trim(),
-      embedding_deployment: creds.embedding_deployment.trim(),
+      embedding_deployment: embedding,
+      // sent explicitly so the width the user was shown is the width the backend uses
+      embedding_dimensions: dimensionsFor(embedding) || undefined,
+      llamaparse_api_key: creds.llamaparse_api_key.trim(),
     }
     saveAzureCreds(clean)
     console.log('azure creds saved to sessionStorage (key masked):', maskKey(clean.api_key))
@@ -81,6 +86,8 @@ export default function LoginPage() {
     // Task 2 (practice-1): Auth0 Universal Login
     await auth.login(state.from && state.from !== '/login' ? state.from : '/chat')
   }
+
+  const chosenDimensions = dimensionsFor(creds.embedding_deployment)
 
   // errors from the backend connect (wrong azure key etc) also show up here
   const shownError =
@@ -218,11 +225,22 @@ export default function LoginPage() {
             </div>
             <div className="field">
               <label className="label">Embedding deployment</label>
-              <input
+              <select
                 className="input mono"
                 value={creds.embedding_deployment}
                 onChange={(e) => update('embedding_deployment', e.target.value)}
-              />
+              >
+                {EMBEDDING_CHOICES.map((c) => (
+                  <option key={c.deployment} value={c.deployment}>
+                    {c.deployment}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">
+                {chosenDimensions
+                  ? `${chosenDimensions} dimensions - the corpus must be ingested with this same model`
+                  : 'vector width is derived on the server'}
+              </span>
             </div>
             <div className="field">
               <label className="label">Small deployment (gpt-4o-mini tier)</label>
@@ -240,6 +258,27 @@ export default function LoginPage() {
                 onChange={(e) => update('strong_deployment', e.target.value)}
               />
             </div>
+          </div>
+
+          <div className="field">
+            <label className="label">LlamaParse API key (optional)</label>
+            <div className="row" style={{ flexWrap: 'nowrap' }}>
+              <input
+                className="input mono"
+                type={showParseKey ? 'text' : 'password'}
+                placeholder="llx-... (your own LlamaCloud key)"
+                value={creds.llamaparse_api_key}
+                onChange={(e) => update('llamaparse_api_key', e.target.value)}
+                autoComplete="off"
+              />
+              <button type="button" className="btn sm" onClick={() => setShowParseKey((s) => !s)}>
+                {showParseKey ? 'hide' : 'show'}
+              </button>
+            </div>
+            <span className="hint">
+              Used only for uploads that carry tables or diagrams, and billed to this key. Leave it blank and
+              those uploads are refused with a message instead of falling back to the server&apos;s key.
+            </span>
           </div>
 
           <button className="btn primary" type="submit" disabled={submitting} style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}>

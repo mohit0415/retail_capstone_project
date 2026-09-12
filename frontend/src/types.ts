@@ -39,6 +39,11 @@ export interface AzureCredentials {
   small_deployment: string
   strong_deployment: string
   embedding_deployment: string
+  // the vector width follows the embedding model; the backend derives it when omitted
+  embedding_dimensions?: number
+  // LlamaCloud key for parsing PDFs with tables / diagrams. Typed here so the
+  // parsing is billed to whoever is logged in, not to the server's own key.
+  llamaparse_api_key: string
 }
 
 export interface AzureCredentialsResponse {
@@ -49,6 +54,10 @@ export interface AzureCredentialsResponse {
   small_deployment: string
   strong_deployment: string
   embedding_deployment: string
+  embedding_dimensions: number
+  llamaparse_configured: boolean
+  llamaparse_source: 'login' | 'env' | 'none'
+  warning: string
   message: string
 }
 

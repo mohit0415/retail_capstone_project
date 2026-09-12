@@ -22,18 +22,26 @@
 
 tiers:
   small:
-    provider: ollama
-    model: llama3.2:latest
-    base_url: http://localhost:11434/v1
-    api_key: ollama            # Ollama ignores it, but the client requires one
-    timeout: 60
-    max_retries: 1
-
-  strong:
     provider: azure
     model: gpt-4o-mini         # Azure deployment name; endpoint/key/api_version come from .env
     timeout: 30
     max_retries: 2
+
+  strong:
+    provider: azure
+    model: gpt-4o-mini         # same deployment as small: one model serves both tiers
+    timeout: 30
+    max_retries: 2
+
+# The ollama provider branch (configs/llms.py) stays supported but is not wired
+# up here, so no local model is ever contacted. To demo it, uncomment:
+#   small:
+#     provider: ollama
+#     model: llama3.2:latest
+#     base_url: http://localhost:11434/v1
+#     api_key: ollama          # Ollama ignores it, but the client requires one
+#     timeout: 60
+#     max_retries: 1
 
 # Example: everything local, zero cost
 # tiers:

@@ -376,3 +376,33 @@ def supersede_previous_versions(doc_type: str, version: str) -> int:
             version,
         )
         return 0
+
+
+def table_embedding_dimensions() -> int | None:
+    """Width of the ``embedding`` column of the live vector table, or None.
+
+    pgvector stores the declared dimension in ``atttypmod``. Returns None when
+    the table does not exist yet (nothing has been ingested), which is not a
+    mismatch - the table is then created at the currently configured width.
+    """
+    try:
+        engine = create_engine(settings.database_url)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT a.atttypmod FROM pg_attribute a "
+                    "JOIN pg_class c ON c.oid = a.attrelid "
+                    "WHERE c.relname = :table AND a.attname = 'embedding' AND a.attnum > 0"
+                ),
+                {"table": _vector_table_name()},
+            ).fetchone()
+
+        if row is None or row[0] is None or row[0] <= 0:
+            return None
+
+        return int(row[0])
+    except Exception:
+        logger.debug("vector table dimension probe failed", exc_info=True)
+
+        return None

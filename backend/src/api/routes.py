@@ -309,6 +309,13 @@ def set_azure_credentials(
             detail="endpoint must look like https://<resource>.openai.azure.com/",
         )
 
+    embedding_deployment = payload.embedding_deployment.strip()
+    # the vector width follows the chosen embedding model, so it is resolved before
+    # the verification call rather than read from the .env value it replaces
+    embedding_dimensions = azure_credentials.resolve_embedding_dimensions(
+        embedding_deployment, payload.embedding_dimensions
+    )
+
     verified = False
 
     if payload.verify:
@@ -317,7 +324,8 @@ def set_azure_credentials(
             payload.api_key.strip(),
             payload.api_version.strip(),
             payload.small_deployment.strip(),
-            payload.embedding_deployment.strip(),
+            embedding_deployment,
+            embedding_dimensions,
         )
 
         if not ok:
@@ -333,12 +341,18 @@ def set_azure_credentials(
         payload.api_version.strip(),
         payload.small_deployment.strip(),
         payload.strong_deployment.strip(),
-        payload.embedding_deployment.strip(),
+        embedding_deployment,
+        embedding_dimensions,
+        payload.llamaparse_api_key.strip(),
     )
 
     logger.info("azure credentials set by user=%s role=%s verified=%s", principal.user_id, principal.role.value, verified)
 
     current = azure_credentials.azure_status()
+    warning = azure_credentials.corpus_dimension_warning(current["embedding_dimensions"])
+
+    if warning:
+        logger.warning("embedding dimension mismatch for user=%s: %s", principal.user_id, warning)
 
     return AzureCredentialsResponse(
         azure_configured=current["azure_configured"],
@@ -348,6 +362,10 @@ def set_azure_credentials(
         small_deployment=current["small_deployment"],
         strong_deployment=current["strong_deployment"],
         embedding_deployment=current["embedding_deployment"],
+        embedding_dimensions=current["embedding_dimensions"],
+        llamaparse_configured=current["llamaparse_configured"],
+        llamaparse_source=current["llamaparse_source"],
+        warning=warning,
         message="credentials applied" + (" and verified" if verified else " without verification"),
     )
 

@@ -14,6 +14,7 @@ import logging
 from urllib.parse import urlparse
 
 from configs.settings import settings
+from src.index.embedding_dims import dimensions_for_deployment
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,10 @@ def _host(endpoint: str) -> str:
         return endpoint
 
 
+# where the LlamaParse key in the live settings came from
+_llamaparse_source = "env" if settings.llamaparse_api_key else "none"
+
+
 def azure_status() -> dict:
     return {
         "azure_configured": settings.azure_configured,
@@ -33,6 +38,9 @@ def azure_status() -> dict:
         "small_deployment": settings.azure_openai_small_deployment,
         "strong_deployment": settings.azure_openai_strong_deployment,
         "embedding_deployment": settings.azure_openai_embedding_deployment,
+        "embedding_dimensions": settings.embedding_dimensions,
+        "llamaparse_configured": bool(settings.llamaparse_api_key),
+        "llamaparse_source": _llamaparse_source,
     }
 
 
@@ -42,6 +50,7 @@ def verify_azure_credentials(
     api_version: str,
     small_deployment: str,
     embedding_deployment: str,
+    embedding_dimensions: int | None = None,
 ) -> tuple[bool, str]:
     """One tiny embedding call + one tiny chat call, so a typo is caught on the login page."""
     from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
@@ -52,7 +61,7 @@ def verify_azure_credentials(
             api_key=api_key,
             api_version=api_version,
             azure_deployment=embedding_deployment,
-            dimensions=settings.embedding_dimensions,
+            dimensions=embedding_dimensions or settings.embedding_dimensions,
             timeout=20,
             max_retries=0,
         )
@@ -88,24 +97,72 @@ def apply_azure_credentials(
     small_deployment: str,
     strong_deployment: str,
     embedding_deployment: str,
+    embedding_dimensions: int | None = None,
+    llamaparse_api_key: str = "",
 ) -> None:
-    """Put the credentials into the live settings and drop every cached model client."""
+    """Put the credentials into the live settings and drop every cached model client.
+
+    ``embedding_dimensions`` is derived from the embedding deployment when it is
+    not given, so picking 3-small or 3-large on the login page re-dimensions the
+    embedder in the same step. ``llamaparse_api_key`` is only overwritten when
+    the caller supplies one - blank leaves whatever the .env had.
+    """
+    global _llamaparse_source
+
     settings.azure_openai_endpoint = endpoint
     settings.azure_openai_api_key = api_key
     settings.azure_openai_api_version = api_version
     settings.azure_openai_small_deployment = small_deployment
     settings.azure_openai_strong_deployment = strong_deployment
     settings.azure_openai_embedding_deployment = embedding_deployment
+    settings.embedding_dimensions = resolve_embedding_dimensions(embedding_deployment, embedding_dimensions)
+
+    if llamaparse_api_key:
+        settings.llamaparse_api_key = llamaparse_api_key
+        _llamaparse_source = "login"
 
     _clear_model_caches()
 
     logger.info(
-        "azure credentials applied endpoint=%s small=%s strong=%s embedding=%s api_version=%s",
+        "azure credentials applied endpoint=%s small=%s strong=%s embedding=%s dimensions=%d "
+        "api_version=%s llamaparse=%s",
         _host(endpoint),
         small_deployment,
         strong_deployment,
         embedding_deployment,
+        settings.embedding_dimensions,
         api_version,
+        _llamaparse_source,
+    )
+
+
+def resolve_embedding_dimensions(embedding_deployment: str, explicit: int | None = None) -> int:
+    """An explicit width from the caller wins; otherwise derive it from the name."""
+    if explicit and explicit > 0:
+        return int(explicit)
+
+    return dimensions_for_deployment(embedding_deployment, settings.embedding_dimensions)
+
+
+def corpus_dimension_warning(embedding_dimensions: int) -> str:
+    """Message to show when the chosen embedding does not fit the ingested corpus.
+
+    The pgvector column is created at a fixed width, so switching the embedding
+    model under an existing corpus makes every search fail on a dimension error.
+    Reported on the login response rather than blocked: an empty corpus, or one
+    about to be re-ingested, is a legitimate reason to switch.
+    """
+    from src.index.vector_index import table_embedding_dimensions
+
+    existing = table_embedding_dimensions()
+
+    if existing is None or existing == embedding_dimensions:
+        return ""
+
+    return (
+        f"the ingested corpus holds {existing}-wide vectors but this embedding deployment "
+        f"produces {embedding_dimensions}. Retrieval will fail until the corpus is re-ingested "
+        f"with this model (or the previous embedding deployment is used again)."
     )
 
 
