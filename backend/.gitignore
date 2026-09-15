@@ -10,3 +10,4 @@ data/policies/*.md
 *.log
 .DS_Store
 AUTH0_ENV_SNIPPET.txt
+.vercel

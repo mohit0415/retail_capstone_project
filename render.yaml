@@ -1,0 +1,39 @@
+databases:
+  - name: rpids-db
+    plan: free
+    databaseName: retail_compliance_db
+    user: rpids
+
+services:
+  - type: web
+    name: rpids-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rpids-db
+          property: connectionString
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: API_AUDIENCE
+        sync: false
+      # the free instance has 512 MB RAM; keep the heavy optional models off
+      - key: ENABLE_FLASHRANK_RERANK
+        value: "false"
+      - key: ENABLE_GUARDRAILS_AI
+        value: "false"
+      - key: BOOTSTRAP_CORPUS_ON_STARTUP
+        value: "false"
+      - key: DB_POOL_MIN_SIZE
+        value: "1"
+      - key: DB_POOL_MAX_SIZE
+        value: "3"

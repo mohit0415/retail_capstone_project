@@ -1,0 +1,2465 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Retail Policy Intelligence & Decision Support System",
+    "description": "Agentic compliance question answering over retail policy documents and operational records",
+    "version": "4.1.0"
+  },
+  "paths": {
+    "/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Who Am I",
+        "description": "The role the Auth0 token resolved to, its scopes and the screens it may open.",
+        "operationId": "who_am_i_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ]
+      }
+    },
+    "/auth/azure": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Set Azure Credentials",
+        "description": "Apply the Azure OpenAI credentials the user typed on the login page.\n\nAny authenticated role may call it, because every user has to enter the\ncredentials on the login page. With ``verify`` (the default) one tiny\nembedding call and one tiny chat call are made first, so a wrong key or\ndeployment name is reported here instead of failing inside the graph.",
+        "operationId": "set_azure_credentials_auth_azure_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureCredentialsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AzureCredentialsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ]
+      }
+    },
+    "/ask": {
+      "post": {
+        "tags": [
+          "ask"
+        ],
+        "summary": "Ask",
+        "operationId": "ask_ask_post",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the request reached a terminal decision the caller can act on. 'answered' carries the answer with its citations, 'refused' means the request was not accepted, 'clarification_required' means an entity in the question was ambiguous. Read the 'status' field to tell them apart.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AnswerResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RefusalResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ClarificationResponse"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "status",
+                    "mapping": {
+                      "answered": "#/components/schemas/AnswerResponse",
+                      "refused": "#/components/schemas/RefusalResponse",
+                      "clarification_required": "#/components/schemas/ClarificationResponse"
+                    }
+                  },
+                  "title": "Response 200 Ask Ask Post"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "the system could not certify an answer and queued it for a human reviewer. No draft answer is returned, because the reason it escalated is that this answer could not be certified. Poll the returned poll_url for the outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingReviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "ask"
+        ],
+        "summary": "Get Request Status",
+        "operationId": "get_request_status_requests__request_id__get",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/review/queue": {
+      "get": {
+        "tags": [
+          "review"
+        ],
+        "summary": "Review Queue",
+        "operationId": "review_queue_review_queue_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/QueueItem"
+                  },
+                  "type": "array",
+                  "title": "Response Review Queue Review Queue Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ]
+      }
+    },
+    "/review/{request_id}": {
+      "get": {
+        "tags": [
+          "review"
+        ],
+        "summary": "Review Package",
+        "operationId": "review_package_review__request_id__get",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPackage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "review"
+        ],
+        "summary": "Submit Review",
+        "operationId": "submit_review_review__request_id__post",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Request Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOutcome"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ingest": {
+      "post": {
+        "tags": [
+          "corpus"
+        ],
+        "summary": "Ingest Document",
+        "operationId": "ingest_document_ingest_post",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_document_ingest_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ingest/status": {
+      "get": {
+        "tags": [
+          "corpus"
+        ],
+        "summary": "Corpus Status",
+        "operationId": "corpus_status_ingest_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorpusStatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ]
+      }
+    },
+    "/ingest/rebuild": {
+      "post": {
+        "tags": [
+          "corpus"
+        ],
+        "summary": "Rebuild Corpus",
+        "operationId": "rebuild_corpus_ingest_rebuild_post",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Confirm"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/slo": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Slo Metrics",
+        "operationId": "slo_metrics_metrics_slo_get",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "title": "Hours"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SloReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics/optimization": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Optimization Metrics",
+        "description": "Cost and latency optimisation evidence.\n\n``caches`` - hit rates and the milliseconds / tokens each cache returned;\n``routing`` - how many routable calls went to the small tier and why;\n``cost`` - real token usage and USD spend, per model and per tier, with\nthe per-request mean and peak against the configured budget.",
+        "operationId": "optimization_metrics_metrics_optimization_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizationReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ]
+      }
+    },
+    "/cache/invalidate": {
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Invalidate Caches",
+        "description": "Drop every cached answer, chunk list and completion (admin only).",
+        "operationId": "invalidate_caches_cache_invalidate_post",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 120,
+              "default": "manual",
+              "title": "Reason"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheInvalidationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnswerResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "answered",
+            "title": "Status",
+            "default": "answered"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "sql_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SqlProof"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
+          "uncertainty_note": {
+            "type": "string",
+            "title": "Uncertainty Note",
+            "default": ""
+          },
+          "evidence_path": {
+            "type": "string",
+            "title": "Evidence Path"
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          },
+          "timings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StageTimings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "history_turns_used": {
+            "type": "integer",
+            "title": "History Turns Used",
+            "default": 0
+          },
+          "thread_summary_used": {
+            "type": "boolean",
+            "title": "Thread Summary Used",
+            "default": false
+          },
+          "standalone_query": {
+            "type": "string",
+            "title": "Standalone Query",
+            "default": ""
+          },
+          "not_found": {
+            "type": "boolean",
+            "title": "Not Found",
+            "default": false
+          },
+          "not_found_reason": {
+            "type": "string",
+            "title": "Not Found Reason",
+            "default": ""
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionTrace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CacheInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "thread_id",
+          "answer",
+          "confidence",
+          "risk_level",
+          "evidence_path"
+        ],
+        "title": "AnswerResponse"
+      },
+      "AskRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 3,
+            "title": "Query"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "document_scope": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Document Scope"
+          },
+          "use_cache": {
+            "type": "boolean",
+            "title": "Use Cache",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "AskRequest"
+      },
+      "AzureCredentialsRequest": {
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "minLength": 12,
+            "title": "Endpoint",
+            "description": "https://<resource>.openai.azure.com/"
+          },
+          "api_key": {
+            "type": "string",
+            "minLength": 8,
+            "title": "Api Key"
+          },
+          "api_version": {
+            "type": "string",
+            "title": "Api Version",
+            "default": "2024-10-21"
+          },
+          "small_deployment": {
+            "type": "string",
+            "title": "Small Deployment",
+            "default": "gpt-4o-mini"
+          },
+          "strong_deployment": {
+            "type": "string",
+            "title": "Strong Deployment",
+            "default": "gpt-4o-mini"
+          },
+          "embedding_deployment": {
+            "type": "string",
+            "title": "Embedding Deployment",
+            "default": "text-embedding-3-large"
+          },
+          "embedding_dimensions": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Embedding Dimensions",
+            "description": "vector width; derived from embedding_deployment when omitted (3-large=3072, 3-small=1536)"
+          },
+          "llamaparse_api_key": {
+            "type": "string",
+            "title": "Llamaparse Api Key",
+            "description": "LlamaCloud key for table/diagram parsing. Blank keeps whatever the server .env had.",
+            "default": ""
+          },
+          "verify": {
+            "type": "boolean",
+            "title": "Verify",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "endpoint",
+          "api_key"
+        ],
+        "title": "AzureCredentialsRequest",
+        "description": "Azure OpenAI credentials typed on the login page (never stored in the frontend .env)."
+      },
+      "AzureCredentialsResponse": {
+        "properties": {
+          "azure_configured": {
+            "type": "boolean",
+            "title": "Azure Configured"
+          },
+          "verified": {
+            "type": "boolean",
+            "title": "Verified",
+            "default": false
+          },
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          },
+          "api_version": {
+            "type": "string",
+            "title": "Api Version",
+            "default": ""
+          },
+          "small_deployment": {
+            "type": "string",
+            "title": "Small Deployment",
+            "default": ""
+          },
+          "strong_deployment": {
+            "type": "string",
+            "title": "Strong Deployment",
+            "default": ""
+          },
+          "embedding_deployment": {
+            "type": "string",
+            "title": "Embedding Deployment",
+            "default": ""
+          },
+          "embedding_dimensions": {
+            "type": "integer",
+            "title": "Embedding Dimensions",
+            "default": 0
+          },
+          "llamaparse_configured": {
+            "type": "boolean",
+            "title": "Llamaparse Configured",
+            "default": false
+          },
+          "llamaparse_source": {
+            "type": "string",
+            "title": "Llamaparse Source",
+            "default": "none"
+          },
+          "warning": {
+            "type": "string",
+            "title": "Warning",
+            "default": ""
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "azure_configured"
+        ],
+        "title": "AzureCredentialsResponse"
+      },
+      "Body_ingest_document_ingest_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_ingest_document_ingest_post"
+      },
+      "CacheInfo": {
+        "properties": {
+          "hit": {
+            "type": "boolean",
+            "title": "Hit",
+            "default": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "semantic"
+            ],
+            "title": "Kind"
+          },
+          "similarity": {
+            "type": "number",
+            "title": "Similarity",
+            "default": 1.0
+          },
+          "age_seconds": {
+            "type": "number",
+            "title": "Age Seconds",
+            "default": 0.0
+          },
+          "matched_query": {
+            "type": "string",
+            "title": "Matched Query",
+            "default": ""
+          },
+          "source_request_id": {
+            "type": "string",
+            "title": "Source Request Id"
+          },
+          "saved_ms_estimate": {
+            "type": "number",
+            "title": "Saved Ms Estimate",
+            "default": 0.0
+          },
+          "saved_tokens_estimate": {
+            "type": "integer",
+            "title": "Saved Tokens Estimate",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "source_request_id"
+        ],
+        "title": "CacheInfo",
+        "description": "Set on an answer served from the response cache instead of a graph run."
+      },
+      "CacheInvalidationResponse": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "cleared": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Cleared"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason",
+          "cleared"
+        ],
+        "title": "CacheInvalidationResponse"
+      },
+      "Citation": {
+        "properties": {
+          "document_title": {
+            "type": "string",
+            "title": "Document Title"
+          },
+          "clause_number": {
+            "type": "string",
+            "title": "Clause Number"
+          },
+          "section": {
+            "type": "string",
+            "title": "Section"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "excerpt": {
+            "type": "string",
+            "title": "Excerpt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_title",
+          "clause_number",
+          "section",
+          "version",
+          "excerpt"
+        ],
+        "title": "Citation"
+      },
+      "ClarificationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "clarification_required",
+            "title": "Status",
+            "default": "clarification_required"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "candidates": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Candidates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "thread_id",
+          "question"
+        ],
+        "title": "ClarificationResponse"
+      },
+      "CorpusStatusResponse": {
+        "properties": {
+          "indexed": {
+            "type": "boolean",
+            "title": "Indexed"
+          },
+          "corpus_dir": {
+            "type": "string",
+            "title": "Corpus Dir"
+          },
+          "embed_model": {
+            "type": "string",
+            "title": "Embed Model"
+          },
+          "embed_model_compatible": {
+            "type": "boolean",
+            "title": "Embed Model Compatible"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "unindexed_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unindexed Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "indexed",
+          "corpus_dir",
+          "embed_model",
+          "embed_model_compatible"
+        ],
+        "title": "CorpusStatusResponse"
+      },
+      "DecisionTrace": {
+        "properties": {
+          "guardrail": {
+            "type": "string",
+            "title": "Guardrail",
+            "default": "pass"
+          },
+          "standalone_query": {
+            "type": "string",
+            "title": "Standalone Query",
+            "default": ""
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "resolved_entities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Resolved Entities"
+          },
+          "risk": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan"
+          },
+          "routed_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routed Path"
+          },
+          "path_decision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Decision"
+          },
+          "evidence_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Path"
+          },
+          "retrieved_chunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Retrieved Chunks"
+          },
+          "sql_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SqlProof"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "panel_verdict": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Verdict"
+          },
+          "cited_clauses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Cited Clauses"
+          },
+          "validation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "tokens_spent": {
+            "type": "integer",
+            "title": "Tokens Spent",
+            "default": 0
+          },
+          "token_budget": {
+            "type": "integer",
+            "title": "Token Budget",
+            "default": 0
+          },
+          "deadline_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Seconds"
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          },
+          "skipped_optional_nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Skipped Optional Nodes"
+          },
+          "budget_stops": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Budget Stops"
+          },
+          "reflection_count": {
+            "type": "integer",
+            "title": "Reflection Count",
+            "default": 0
+          },
+          "panel_repair_count": {
+            "type": "integer",
+            "title": "Panel Repair Count",
+            "default": 0
+          },
+          "terminal_outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Outcome"
+          },
+          "escalation_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Reason"
+          },
+          "escalation_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Reference"
+          },
+          "model_routing": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Model Routing"
+          },
+          "llm_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Usage"
+          },
+          "agent_steps": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Agent Steps",
+            "description": "the multi-agent workflow in run order: agent, status, elapsed_ms, summary, model tier"
+          }
+        },
+        "type": "object",
+        "title": "DecisionTrace",
+        "description": "How the graph reached its decision, in the order the nodes ran.\n\nAttached to every /ask response so the caller can see the routing and the\ncertification evidence without opening the reviewer console. The draft\nanswer itself is *not* part of the trace: on a 202 it stays withheld\nbecause it could not be certified."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IngestResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "indexed",
+              "skipped"
+            ],
+            "title": "Status"
+          },
+          "file_name": {
+            "type": "string",
+            "title": "File Name"
+          },
+          "doc_type": {
+            "type": "string",
+            "title": "Doc Type",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "default": ""
+          },
+          "parsed_with": {
+            "type": "string",
+            "title": "Parsed With",
+            "default": ""
+          },
+          "total_nodes": {
+            "type": "integer",
+            "title": "Total Nodes",
+            "default": 0
+          },
+          "text_nodes": {
+            "type": "integer",
+            "title": "Text Nodes",
+            "default": 0
+          },
+          "table_nodes": {
+            "type": "integer",
+            "title": "Table Nodes",
+            "default": 0
+          },
+          "image_nodes": {
+            "type": "integer",
+            "title": "Image Nodes",
+            "default": 0
+          },
+          "superseded_nodes": {
+            "type": "integer",
+            "title": "Superseded Nodes",
+            "default": 0
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "file_name"
+        ],
+        "title": "IngestResponse"
+      },
+      "MeResponse": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "departments": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Departments"
+          },
+          "access_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Access Scopes"
+          },
+          "auth0_roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Auth0 Roles"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "permissions": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Permissions"
+          },
+          "screens": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Screens"
+          },
+          "azure_configured": {
+            "type": "boolean",
+            "title": "Azure Configured",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "title": "MeResponse",
+        "description": "What the Auth0 token resolved to on the backend - the frontend uses it for role-based screens."
+      },
+      "OptimizationReport": {
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "caches": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Caches"
+          },
+          "routing": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Routing"
+          },
+          "cost": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Cost"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generated_at",
+          "caches",
+          "routing",
+          "cost"
+        ],
+        "title": "OptimizationReport",
+        "description": "Cost and latency optimisation evidence: cache effectiveness, routing mix, spend."
+      },
+      "PendingReviewResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "pending_review",
+            "title": "Status",
+            "default": "pending_review"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "escalation_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Reference"
+          },
+          "queued_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Queued At"
+          },
+          "poll_url": {
+            "type": "string",
+            "title": "Poll Url"
+          },
+          "timings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StageTimings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionTrace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "thread_id",
+          "risk_level",
+          "reason",
+          "queued_at",
+          "poll_url"
+        ],
+        "title": "PendingReviewResponse"
+      },
+      "QueueItem": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "queued_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Queued At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "thread_id",
+          "user_id",
+          "risk_level",
+          "reason",
+          "queued_at"
+        ],
+        "title": "QueueItem"
+      },
+      "RebuildResponse": {
+        "properties": {
+          "cleared_chunks": {
+            "type": "integer",
+            "title": "Cleared Chunks"
+          },
+          "corpus_dir": {
+            "type": "string",
+            "title": "Corpus Dir"
+          },
+          "embed_model": {
+            "type": "string",
+            "title": "Embed Model"
+          },
+          "indexed_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Indexed Files"
+          },
+          "skipped_files": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Skipped Files"
+          },
+          "total_nodes": {
+            "type": "integer",
+            "title": "Total Nodes",
+            "default": 0
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "unindexed_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unindexed Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cleared_chunks",
+          "corpus_dir",
+          "embed_model"
+        ],
+        "title": "RebuildResponse"
+      },
+      "RefusalResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "refused",
+            "title": "Status",
+            "default": "refused"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "reason"
+        ],
+        "title": "RefusalResponse"
+      },
+      "ReviewDecision": {
+        "type": "string",
+        "enum": [
+          "accept",
+          "edit",
+          "reject"
+        ],
+        "title": "ReviewDecision"
+      },
+      "ReviewOutcome": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "recorded",
+            "title": "Status",
+            "default": "recorded"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "resumed": {
+            "type": "boolean",
+            "title": "Resumed"
+          },
+          "released": {
+            "type": "boolean",
+            "title": "Released"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "answer_source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "panel_consensus",
+                  "system_draft",
+                  "reviewer_edit"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Source"
+          },
+          "evidence_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Path"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "decision",
+          "resumed",
+          "released"
+        ],
+        "title": "ReviewOutcome"
+      },
+      "ReviewPackage": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "original_query": {
+            "type": "string",
+            "title": "Original Query"
+          },
+          "standalone_query": {
+            "type": "string",
+            "title": "Standalone Query"
+          },
+          "conversation_history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Conversation History"
+          },
+          "retrieved_documents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Retrieved Documents"
+          },
+          "sql_evidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Evidence"
+          },
+          "validation_output": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Validation Output"
+          },
+          "reasoning_trace": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Reasoning Trace"
+          },
+          "draft_answer": {
+            "type": "string",
+            "title": "Draft Answer"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "evidence_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Path"
+          },
+          "panel_verdict": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Verdict"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan"
+          },
+          "panel_repair_count": {
+            "type": "integer",
+            "title": "Panel Repair Count",
+            "default": 0
+          },
+          "reflection_count": {
+            "type": "integer",
+            "title": "Reflection Count",
+            "default": 0
+          },
+          "reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Id"
+          },
+          "budget_stops": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Budget Stops"
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "thread_id",
+          "original_query",
+          "standalone_query",
+          "conversation_history",
+          "retrieved_documents",
+          "sql_evidence",
+          "validation_output",
+          "reasoning_trace",
+          "draft_answer",
+          "risk_level",
+          "confidence"
+        ],
+        "title": "ReviewPackage"
+      },
+      "ReviewSubmission": {
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ReviewDecision"
+          },
+          "edited_answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited Answer"
+          },
+          "reviewer_notes": {
+            "type": "string",
+            "title": "Reviewer Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "title": "ReviewSubmission",
+        "description": "Reviewer decision.\n\n- accept: release ``draft_answer`` exactly as the system produced it\n  (for High-risk requests that is the multi-agent panel consensus).\n  ``edited_answer`` is ignored.\n- edit:   release ``edited_answer`` instead; it is required and must be non-empty.\n- reject: release nothing."
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "store_associate",
+          "store_manager",
+          "compliance_officer",
+          "legal_reviewer",
+          "admin"
+        ],
+        "title": "Role"
+      },
+      "SloOutcomeCount": {
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "outcome",
+          "count"
+        ],
+        "title": "SloOutcomeCount"
+      },
+      "SloPathLatency": {
+        "properties": {
+          "evidence_path": {
+            "type": "string",
+            "title": "Evidence Path"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "total_p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total P95 Ms"
+          },
+          "target_p95_ms": {
+            "type": "number",
+            "title": "Target P95 Ms"
+          },
+          "meets_slo": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Slo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evidence_path",
+          "count",
+          "target_p95_ms"
+        ],
+        "title": "SloPathLatency"
+      },
+      "SloReport": {
+        "properties": {
+          "window_hours": {
+            "type": "integer",
+            "title": "Window Hours"
+          },
+          "sample_size": {
+            "type": "integer",
+            "title": "Sample Size"
+          },
+          "measured_from": {
+            "type": "string",
+            "title": "Measured From"
+          },
+          "total_target_basis": {
+            "type": "string",
+            "title": "Total Target Basis"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/SloStage"
+            },
+            "type": "array",
+            "title": "Stages"
+          },
+          "total": {
+            "$ref": "#/components/schemas/SloTotal"
+          },
+          "breached_stages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Breached Stages"
+          },
+          "breached_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Breached Paths"
+          },
+          "outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/SloOutcomeCount"
+            },
+            "type": "array",
+            "title": "Outcomes"
+          },
+          "evidence_paths": {
+            "items": {
+              "$ref": "#/components/schemas/SloPathLatency"
+            },
+            "type": "array",
+            "title": "Evidence Paths"
+          }
+        },
+        "type": "object",
+        "required": [
+          "window_hours",
+          "sample_size",
+          "measured_from",
+          "total_target_basis",
+          "stages",
+          "total"
+        ],
+        "title": "SloReport"
+      },
+      "SloStage": {
+        "properties": {
+          "stage": {
+            "type": "string",
+            "title": "Stage"
+          },
+          "meaning": {
+            "type": "string",
+            "title": "Meaning"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Ms"
+          },
+          "target_p95_ms": {
+            "type": "number",
+            "title": "Target P95 Ms"
+          },
+          "meets_slo": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Slo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage",
+          "meaning",
+          "target_p95_ms"
+        ],
+        "title": "SloStage"
+      },
+      "SloTotal": {
+        "properties": {
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          },
+          "p99_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P99 Ms"
+          },
+          "target_p95_ms": {
+            "type": "number",
+            "title": "Target P95 Ms"
+          },
+          "meets_slo": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Slo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_p95_ms"
+        ],
+        "title": "SloTotal"
+      },
+      "SqlProof": {
+        "properties": {
+          "template_id": {
+            "type": "string",
+            "title": "Template Id"
+          },
+          "statement": {
+            "type": "string",
+            "title": "Statement"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Parameters"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          },
+          "as_of": {
+            "type": "string",
+            "title": "As Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "template_id",
+          "statement",
+          "parameters",
+          "row_count",
+          "as_of"
+        ],
+        "title": "SqlProof"
+      },
+      "StageTimings": {
+        "properties": {
+          "t1_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T1 Ms"
+          },
+          "t2_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T2 Ms"
+          },
+          "t3_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T3 Ms"
+          },
+          "t4_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T4 Ms"
+          },
+          "total_ms": {
+            "type": "number",
+            "title": "Total Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_ms"
+        ],
+        "title": "StageTimings"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "BearerToken": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
