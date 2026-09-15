@@ -2461,5 +2461,11 @@
         "scheme": "bearer"
       }
     }
-  }
+  },
+  "servers": [
+    {
+      "url": "https://rpids-api.onrender.com",
+      "description": "Render (live)"
+    }
+  ]
 }
