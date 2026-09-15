@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     mcp_max_output_chars: int = 6000
 
     enable_guardrails_ai: bool = True
+    # Presidio + spaCy en_core_web_lg need ~500 MB of RAM; small hosts turn this off
+    # and PII redaction falls back to the regex patterns in src.guardrails.pii.
+    enable_presidio_pii: bool = True
     pii_entities: str = ""
 
     escalation_email_enabled: bool = False

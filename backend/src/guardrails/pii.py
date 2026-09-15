@@ -35,6 +35,14 @@ def _load_presidio():
     if _analyzer is not None:
         return _analyzer, _anonymizer
 
+    from configs.settings import settings
+
+    if not settings.enable_presidio_pii:
+        logger.info("presidio disabled by ENABLE_PRESIDIO_PII; using regex redaction")
+        _analyzer = False
+        _anonymizer = False
+        return _analyzer, _anonymizer
+
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine

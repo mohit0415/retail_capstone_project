@@ -31,6 +31,8 @@ services:
         value: "false"
       - key: ENABLE_GUARDRAILS_AI
         value: "false"
+      - key: ENABLE_PRESIDIO_PII
+        value: "false"
       - key: BOOTSTRAP_CORPUS_ON_STARTUP
         value: "false"
       - key: DB_POOL_MIN_SIZE
