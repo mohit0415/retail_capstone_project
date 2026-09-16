@@ -1,8 +1,11 @@
+import os
 import random
 from datetime import datetime, timedelta
 
 import psycopg2
 
+# DATABASE_URL (same variable the backend uses) wins when set, so the generator
+# can seed a remote database (e.g. Render) without editing this file.
 DB_CONFIG = {
     "dbname": "retail_compliance_db",
     "user": "your_user",
@@ -42,7 +45,8 @@ def severity_from_risk(score):
     return "Low"
 
 def main():
-    conn = psycopg2.connect(**DB_CONFIG)
+    dsn = os.environ.get("DATABASE_URL")
+    conn = psycopg2.connect(dsn) if dsn else psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
     vendor_ids = []

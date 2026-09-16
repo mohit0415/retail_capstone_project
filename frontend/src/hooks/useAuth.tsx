@@ -67,6 +67,18 @@ export interface AuthState {
   isAdmin: boolean
 }
 
+// getAccessTokenSilently() failures come from Auth0 itself, not our backend.
+// Its raw messages ("Consent required", "Login required") say nothing about
+// what to do, so translate the two the user can actually act on.
+function friendlyAuth0Error(err: unknown): string {
+  const code = (err as { error?: string } | null)?.error
+  if (code === 'consent_required')
+    return 'Auth0 needs you to approve API access for this app once — click "Auth0 login" and accept the consent screen. (Auth0 always asks on localhost, then remembers your answer.)'
+  if (code === 'login_required')
+    return 'Your Auth0 session has expired — click "Auth0 login" to sign in again.'
+  return err instanceof Error ? err.message : String(err)
+}
+
 const AuthContext = createContext<AuthState | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -183,13 +195,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setBackendStatus('error')
         }
       } else {
-        setBackendError(err instanceof Error ? err.message : String(err))
+        const code = (err as { error?: string } | null)?.error
+        if (code === 'consent_required' || code === 'login_required') {
+          // Silent auth runs in a hidden iframe that cannot show Auth0's
+          // consent or login dialog (and on localhost Auth0 never skips
+          // consent). A full redirect CAN show it, and Auth0 remembers the
+          // grant, so this only ever happens once per user.
+          console.log(`silent auth said ${code} - redirecting to Auth0 to resolve it`)
+          try {
+            await loginWithRedirect({ appState: { returnTo: window.location.pathname } })
+            return
+          } catch (redirectErr) {
+            // redirect could not start - fall through to the banner below
+            console.log('redirect to Auth0 failed', redirectErr)
+          }
+        }
+        setBackendError(friendlyAuth0Error(err))
         setBackendStatus('error')
       }
     } finally {
       connecting.current = false
     }
-  }, [getToken, checkTokens])
+  }, [getToken, checkTokens, loginWithRedirect])
 
   // "I fixed the role in Auth0": the cached token still has the OLD roles,
   // so ask Auth0 for a brand new one. If that is not possible silently
