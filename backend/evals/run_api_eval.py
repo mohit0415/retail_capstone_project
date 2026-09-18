@@ -62,10 +62,13 @@ STATUS_FOR_OUTCOME = {
     "pending_review": 202,
 }
 
-STOPWORDS = frozenset(
-    "the a an and or of to in for is are was were be been with on at by from as it its this that "
-    "what which who whom how when where do does did can could should would may must not no".split()
-)
+STOPWORDS = frozenset([
+    "the", "a", "an", "and", "or", "of", "to", "in", "for", "is", "are",
+    "was", "were", "be", "been", "with", "on", "at", "by", "from", "as",
+    "it", "its", "this", "that", "what", "which", "who", "whom", "how",
+    "when", "where", "do", "does", "did", "can", "could", "should",
+    "would", "may", "must", "not", "no",
+])
 
 
 @dataclass
