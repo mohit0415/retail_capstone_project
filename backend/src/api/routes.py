@@ -48,7 +48,7 @@ from src.ingestion.bootstrap import corpus_dir, corpus_is_indexed, unindexed_fil
 from src.ingestion.pipeline import ingest_directory, ingest_file
 from src.llm_routing.ledger import cost_ledger
 from src.llm_routing.router import routing_report
-from src.observability import slo
+from src.observability import langfuse_metrics, ragas_eval, slo
 from src.observability.agent_steps import build_agent_steps
 from src.observability.langfuse_callback import flush_langfuse_traces, setup_langfuse_callback
 from src.observability.logging_config import bind_request_context, reset_request_context
@@ -67,12 +67,15 @@ from src.schemas.api import (
     CorpusStatusResponse,
     DecisionTrace,
     IngestResponse,
+    LangfuseLatencyReport,
     MeResponse,
     OptimizationReport,
     PendingReviewResponse,
     QueueItem,
+    RagasReport,
     RebuildResponse,
     RefusalResponse,
+    RequestEvaluation,
     ReviewOutcome,
     ReviewPackage,
     ReviewSubmission,
@@ -781,6 +784,25 @@ def _ask(
         draft.answer,
     )
 
+    if settings.enable_ragas_eval and not body.get("not_found"):
+        # scored after the response is already on the wire; the frontend picks the
+        # result up lazily via GET /requests/{request_id}/evaluation
+        background.add_task(
+            ragas_eval.evaluate_answer,
+            request_id,
+            thread_id,
+            final_state.get("standalone_query") or payload.query,
+            draft.answer,
+            # prefix each chunk with its provenance: the answer cites clauses as
+            # "[Title §N]", and a judge given bare text counts that citation as an
+            # unsupported claim, deflating faithfulness on every request
+            [
+                f"{chunk.citation} ({chunk.section}): {chunk.content}" if chunk.section else f"{chunk.citation}: {chunk.content}"
+                for chunk in final_state.get("retrieved_chunks", [])
+            ],
+            final_state.get("evidence_path"),
+        )
+
     idempotency_store.put(cache_key, body, status.HTTP_200_OK)
 
     if cache_eligible:
@@ -838,6 +860,33 @@ def get_request_status(request_id: str, principal: Principal = Depends(current_p
         "risk_level": row["risk_level"],
         "reviewed_at": row["reviewed_at"],
     }
+
+
+@router.get("/requests/{request_id}/evaluation", response_model=RequestEvaluation, tags=["ask"])
+def request_evaluation(request_id: str, principal: Principal = Depends(current_principal)) -> RequestEvaluation:
+    """RAGAS quality scores for one answer, scored in the background after /ask.
+
+    ``pending`` until the background task lands (typically a few seconds after
+    the answer) - the frontend retries a couple of times and then gives up.
+    """
+    row = ragas_eval.fetch_evaluation(request_id)
+
+    if row is None:
+        return RequestEvaluation(status="pending", request_id=request_id)
+
+    return RequestEvaluation(
+        status=row["status"],
+        request_id=row["request_id"],
+        evidence_path=row["evidence_path"],
+        skipped_reason=row["skipped_reason"],
+        faithfulness=row["faithfulness"],
+        context_precision=row["context_precision"],
+        context_recall=row["context_recall"],
+        judge_model=row["judge_model"],
+        contexts_scored=row["contexts_scored"] or 0,
+        duration_ms=row["duration_ms"],
+        error=row["error"],
+    )
 
 
 @router.get("/review/queue", response_model=list[QueueItem], tags=["review"])
@@ -1367,6 +1416,27 @@ def slo_metrics(
         return SloReport(**slo.latency_report(hours or settings.slo_window_hours))
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"latency history is unavailable: {exc}") from exc
+
+
+@router.get("/metrics/ragas", response_model=RagasReport, tags=["ops"])
+def ragas_metrics(
+    hours: int = Query(default=None, ge=1, le=720),
+    principal: Principal = Depends(require_reviewer),
+) -> RagasReport:
+    """Rolling RAGAS answer-quality aggregates (faithfulness / precision / recall)."""
+    try:
+        return RagasReport(**ragas_eval.quality_report(hours or settings.slo_window_hours))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"evaluation history is unavailable: {exc}") from exc
+
+
+@router.get("/metrics/langfuse", response_model=LangfuseLatencyReport, tags=["ops"])
+def langfuse_latency(
+    hours: int = Query(default=None, ge=1, le=720),
+    principal: Principal = Depends(require_reviewer),
+) -> LangfuseLatencyReport:
+    """Trace latency p50/p95 as the Langfuse portal sees the same window."""
+    return LangfuseLatencyReport(**langfuse_metrics.latency_percentiles(hours or settings.slo_window_hours))
 
 
 @router.get("/metrics/optimization", response_model=OptimizationReport, tags=["ops"])

@@ -187,6 +187,9 @@ class CostLedger:
         with self._lock:
             tracked = len(self._requests)
             per_request = [r.total.usd for r in self._requests.values()]
+            per_request_tokens = [
+                r.total.prompt_tokens + r.total.completion_tokens for r in self._requests.values()
+            ]
             process = self.process.as_dict()
             by_model = {name: usage.as_dict() for name, usage in self.by_model.items()}
             by_tier = {name: usage.as_dict() for name, usage in self.by_tier.items()}
@@ -203,6 +206,10 @@ class CostLedger:
             "requests_tracked": tracked,
             "usd_per_request_mean": mean,
             "usd_per_request_peak": peak,
+            "tokens_per_request_mean": round(sum(per_request_tokens) / len(per_request_tokens))
+            if per_request_tokens
+            else 0,
+            "tokens_per_request_max": max(per_request_tokens) if per_request_tokens else 0,
             "requests_over_budget": over,
             "budget_usd_per_request": settings.cost_budget_usd_per_request,
             "small_tier_share": _share(by_tier, "small"),

@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { v4 as uuidv4 } from 'uuid'
-import { ApiError, askQuestion, getRequestStatus, streamText } from '../apiService'
+import { ApiError, askQuestion, getEvaluation, getRequestStatus, streamText } from '../apiService'
 import AgentWorkflow from '../components/AgentWorkflow'
 import { ROLE_LABELS, useAuth } from '../hooks/useAuth'
 import type { AnswerResponse, ClarificationResponse, PendingReviewResponse } from '../types'
@@ -78,6 +78,39 @@ function riskClass(level?: string) {
   return 'rose'
 }
 
+// ----- RAGAS answer quality (scored in the background, fetched lazily) -----
+
+const EVAL_RETRY_DELAYS_MS = [3000, 5000, 8000, 12000]
+
+const QUALITY_METRICS = [
+  {
+    key: 'faithfulness',
+    label: 'faithfulness',
+    hint: 'How many of the claims in this answer are supported by the retrieved clauses.',
+  },
+  {
+    key: 'answer_accuracy',
+    label: 'accuracy',
+    hint: 'A yes/no judge verdict: does the answer correctly answer the question, with every factual statement backed by the retrieved clauses.',
+  },
+  {
+    key: 'context_precision',
+    label: 'precision',
+    hint: 'How many of the retrieved clauses were actually relevant to this answer.',
+  },
+  {
+    key: 'context_recall',
+    label: 'recall',
+    hint: 'Whether retrieval brought back the clauses the answer needed. Measured against the generated answer — a live request has no golden reference.',
+  },
+] as const
+
+function qualityClass(v: number) {
+  if (v >= 0.8) return 'teal'
+  if (v >= 0.5) return 'amber'
+  return 'rose'
+}
+
 // ----- component -----
 
 export default function ChatPage() {
@@ -126,6 +159,23 @@ export default function ChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [active?.messages, stageIdx])
+
+  // answers restored from localStorage may still be waiting for their quality
+  // scores (the page was closed while the judge ran) - resume the fetch once
+  useEffect(() => {
+    for (const t of threads) {
+      for (const m of t.messages) {
+        if (m.kind !== 'answer' || m.status !== 'done' || m.evaluationDone || !m.data) continue
+        const d = m.data as AnswerResponse
+        if (d.status !== 'answered' || d.not_found) {
+          updateMessage(t.id, m.id, (x) => ({ ...x, evaluationDone: true }))
+          continue
+        }
+        void fetchQuality(t.id, m.id, d.cache?.source_request_id || d.request_id)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // fake progress of the pipeline while we wait for /ask
   useEffect(() => {
@@ -182,6 +232,25 @@ export default function ChatPage() {
     updateMessage(threadId, messageId, (m) => ({ ...m, status: 'done' }))
   }
 
+  // the RAGAS judge runs as a backend background task; poll a few times with
+  // increasing delays and give up quietly (quality chips just don't appear)
+  async function fetchQuality(threadId: string, messageId: string, requestId: string) {
+    for (const delay of EVAL_RETRY_DELAYS_MS) {
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      try {
+        const token = await auth.getToken()
+        const evaluation = await getEvaluation(token, requestId)
+        if (evaluation.status !== 'pending') {
+          updateMessage(threadId, messageId, (m) => ({ ...m, evaluation, evaluationDone: true }))
+          return
+        }
+      } catch (e) {
+        console.log('quality fetch failed', e)
+      }
+    }
+    updateMessage(threadId, messageId, (m) => ({ ...m, evaluationDone: true }))
+  }
+
   // ask the backend ONCE whether a reviewer released the escalated answer
   // (we used to poll every 6 seconds with a spinner - now it only happens when the user clicks)
   async function checkStatus(threadId: string, messageId: string, requestId: string) {
@@ -236,6 +305,10 @@ export default function ChatPage() {
         updateThread(threadId, (t) => ({ ...t, thread_id: body.thread_id }))
         updateMessage(threadId, botMsg.id, (m) => ({ ...m, kind: 'answer', data: body, requestId: body.request_id }))
         setSending(false)
+        if (!body.not_found) {
+          // a cache hit re-uses the scores of the request that produced the answer
+          void fetchQuality(threadId, botMsg.id, body.cache?.source_request_id || body.request_id)
+        }
         await revealAnswer(threadId, botMsg.id, body.answer)
         return
       }
@@ -310,9 +383,13 @@ export default function ChatPage() {
   function renderAnswerMeta(m: Message) {
     const d = m.data as AnswerResponse
     const trace = d.trace
+    const ev = m.evaluation
     // "degraded" only because the role has no SQL tables (not because of the time/token budget)
     const partialEvidence =
       !!(trace?.path_decision as { partial_evidence?: boolean } | null)?.partial_evidence && !trace?.budget_stops?.length
+    // real billed usage from the cost ledger (a cache hit bills no new tokens)
+    const usage = trace?.llm_usage as { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number; usd?: number } | null
+    const usageTokens = Number(usage?.total_tokens || 0)
     return (
       <>
         <div className="meta-row">
@@ -343,7 +420,31 @@ export default function ChatPage() {
             </span>
           )}
           {d.timings && <span className="chip">{Math.round(d.timings.total_ms)} ms</span>}
+          {usageTokens > 0 && (
+            <span
+              className="chip"
+              title={`billed for this answer: ${usage?.prompt_tokens ?? 0} prompt + ${usage?.completion_tokens ?? 0} completion tokens`}
+            >
+              {usageTokens.toLocaleString()} tok · ${Number(usage?.usd || 0).toFixed(4)}
+            </span>
+          )}
           {d.history_turns_used > 0 && <span className="chip">{d.history_turns_used} turns of history</span>}
+          {!d.not_found && !m.evaluationDone && <span className="chip shimmer">scoring quality…</span>}
+          {ev?.status === 'done' &&
+            QUALITY_METRICS.map(({ key, label, hint }) => {
+              const value = ev[key]
+              if (value === null || value === undefined) return null
+              return (
+                <span key={key} className={'chip ' + qualityClass(value)} title={hint}>
+                  {label} {Math.round(value * 100)}%
+                </span>
+              )
+            })}
+          {ev?.status === 'skipped' && (
+            <span className="chip" title="no retrieved policy clauses to ground against (record-only answer)">
+              quality n/a
+            </span>
+          )}
         </div>
 
         {d.uncertainty_note && (
@@ -375,6 +476,42 @@ export default function ChatPage() {
             </summary>
             <pre className="json">{d.sql_evidence.statement}</pre>
             <pre className="json">{JSON.stringify(d.sql_evidence.parameters, null, 2)}</pre>
+          </details>
+        )}
+
+        {ev?.status === 'done' && (
+          <details className="box quality-box" style={{ marginTop: 10 }}>
+            <summary>
+              Answer quality (RAGAS) · {ev.contexts_scored} clause{ev.contexts_scored === 1 ? '' : 's'} judged
+              {ev.judge_model ? ` by ${ev.judge_model}` : ''}
+              {ev.duration_ms ? ` · ${(ev.duration_ms / 1000).toFixed(1)}s` : ''}
+              {ev.request_id !== d.request_id ? ' · from cached source answer' : ''}
+            </summary>
+            {QUALITY_METRICS.map(({ key, label, hint }) => {
+              const value = ev[key]
+              return (
+                <div key={key} className="quality-row">
+                  <div className="row spread small">
+                    <span>
+                      {label === 'precision' ? 'context precision' : label === 'recall' ? 'context recall' : label}
+                      {key === 'context_recall' && (
+                        <span className="muted" title={hint}>
+                          {' '}
+                          (vs generated answer)
+                        </span>
+                      )}
+                    </span>
+                    <span className={value === null || value === undefined ? 'muted' : ''}>
+                      {value === null || value === undefined ? 'not scored' : `${Math.round(value * 100)}%`}
+                    </span>
+                  </div>
+                  <div className={'bar ' + (value !== null && value !== undefined ? qualityClass(value) : '')}>
+                    <span style={{ width: `${Math.round((value || 0) * 100)}%` }} />
+                  </div>
+                  <p className="quality-hint">{hint}</p>
+                </div>
+              )
+            })}
           </details>
         )}
 

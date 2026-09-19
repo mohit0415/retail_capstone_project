@@ -12,10 +12,13 @@ import type {
   CorpusStatusResponse,
   HealthResponse,
   IngestResponse,
+  LangfuseLatencyReport,
   MeResponse,
   OptimizationReport,
   QueueItem,
+  RagasReport,
   RebuildResponse,
+  RequestEvaluation,
   RequestStatus,
   ReviewDecision,
   ReviewOutcome,
@@ -129,6 +132,15 @@ export async function getRequestStatus(token: string, requestId: string): Promis
   return handle<RequestStatus>(response)
 }
 
+// RAGAS quality scores land a few seconds after the answer (background task);
+// "pending" means the judge has not finished yet - the caller retries.
+export async function getEvaluation(token: string, requestId: string): Promise<RequestEvaluation> {
+  const response = await fetch(`${API_URL}/requests/${encodeURIComponent(requestId)}/evaluation`, {
+    headers: authHeaders(token),
+  })
+  return handle<RequestEvaluation>(response)
+}
+
 // ---------------- "streaming" ----------------
 // The backend /ask returns the whole certified answer in one JSON (it has to
 // run the guardrails + validation before it can release anything). To keep the
@@ -208,6 +220,18 @@ export async function getSloReport(token: string, hours?: number): Promise<SloRe
   const params = hours ? `?hours=${hours}` : ''
   const response = await fetch(`${API_URL}/metrics/slo${params}`, { headers: authHeaders(token) })
   return handle<SloReport>(response)
+}
+
+export async function getRagasReport(token: string, hours?: number): Promise<RagasReport> {
+  const params = hours ? `?hours=${hours}` : ''
+  const response = await fetch(`${API_URL}/metrics/ragas${params}`, { headers: authHeaders(token) })
+  return handle<RagasReport>(response)
+}
+
+export async function getLangfuseLatency(token: string, hours?: number): Promise<LangfuseLatencyReport> {
+  const params = hours ? `?hours=${hours}` : ''
+  const response = await fetch(`${API_URL}/metrics/langfuse${params}`, { headers: authHeaders(token) })
+  return handle<LangfuseLatencyReport>(response)
 }
 
 export async function getOptimizationReport(token: string): Promise<OptimizationReport> {

@@ -41,6 +41,9 @@ def client(no_db, no_tracing, auth0, monkeypatch):
     monkeypatch.setattr(conversation, "record_assistant_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(conversation, "load_thread", lambda thread_id: ([], ""))
     monkeypatch.setattr(routes.slo, "record_latency", lambda *args, **kwargs: None)
+    # the RAGAS background task would otherwise run inline after each /ask and
+    # try to reach a judge model; the endpoints get their own tests below
+    monkeypatch.setattr(settings, "enable_ragas_eval", False)
 
     return TestClient(app)
 
@@ -1342,6 +1345,138 @@ def test_slo_metrics_accept_a_window_and_reject_a_silly_one(client, auth, monkey
 
 def test_slo_metrics_need_a_reviewer_role(client, auth):
     assert client.get("/metrics/slo", headers=auth(Role.STORE_MANAGER)).status_code == 403
+
+
+def _ragas_report(hours):
+    return {
+        "window_hours": hours,
+        "scored": 3,
+        "skipped": 1,
+        "failed": 0,
+        "metrics": [
+            {"metric": "faithfulness", "mean": 0.9, "p50": 0.92, "target_mean": 0.85, "meets_target": True},
+            {"metric": "context_precision", "mean": 0.7, "p50": 0.7, "target_mean": 0.75, "meets_target": False},
+            {"metric": "context_recall", "mean": 0.88, "p50": 0.9, "target_mean": 0.8, "meets_target": True},
+        ],
+        "low_faithfulness_count": 0,
+        "low_faithfulness_rate": 0.0,
+        "low_faithfulness_ceiling": 0.7,
+        "recall_basis": "generated_answer",
+        "recent": [],
+    }
+
+
+def test_ragas_metrics_report_the_rolling_quality_window(client, auth, monkeypatch):
+    monkeypatch.setattr(routes.ragas_eval, "quality_report", _ragas_report)
+
+    body = client.get("/metrics/ragas", headers=auth()).json()
+
+    assert body["window_hours"] == settings.slo_window_hours
+    assert body["scored"] == 3
+    assert body["metrics"][0]["metric"] == "faithfulness"
+    assert body["metrics"][1]["meets_target"] is False
+    assert body["recall_basis"] == "generated_answer"
+
+
+def test_ragas_metrics_need_a_reviewer_and_503_without_history(client, auth, monkeypatch):
+    assert client.get("/metrics/ragas", headers=auth(Role.STORE_MANAGER)).status_code == 403
+
+    def _boom(hours):
+        raise RuntimeError("request_evaluations table missing")
+
+    monkeypatch.setattr(routes.ragas_eval, "quality_report", _boom)
+
+    response = client.get("/metrics/ragas", headers=auth())
+
+    assert response.status_code == 503
+    assert "request_evaluations" in response.json()["detail"]
+
+
+def test_langfuse_metrics_pass_the_portal_report_through(client, auth, monkeypatch):
+    def _portal(hours):
+        return {
+            "enabled": True,
+            "host": "https://us.cloud.langfuse.com",
+            "window_hours": hours,
+            "trace_name": "policy_graph",
+            "trace_count": 12,
+            "p50_ms": 8000.0,
+            "p95_ms": 21000.0,
+            "error": None,
+        }
+
+    monkeypatch.setattr(routes.langfuse_metrics, "latency_percentiles", _portal)
+
+    body = client.get("/metrics/langfuse", params={"hours": 6}, headers=auth()).json()
+
+    assert body["enabled"] is True
+    assert body["window_hours"] == 6
+    assert body["p95_ms"] == 21000.0
+
+    assert client.get("/metrics/langfuse", headers=auth(Role.STORE_ASSOCIATE)).status_code == 403
+
+
+def test_a_request_evaluation_is_pending_until_the_judge_lands(client, auth, monkeypatch):
+    monkeypatch.setattr(routes.ragas_eval, "fetch_evaluation", lambda request_id: None)
+
+    body = client.get("/requests/some-id/evaluation", headers=auth(Role.STORE_ASSOCIATE)).json()
+
+    assert body["status"] == "pending"
+    assert body["request_id"] == "some-id"
+
+
+def test_a_request_evaluation_returns_the_stored_scores(client, auth, monkeypatch):
+    monkeypatch.setattr(
+        routes.ragas_eval,
+        "fetch_evaluation",
+        lambda request_id: {
+            "request_id": request_id,
+            "thread_id": "t1",
+            "evidence_path": "rag",
+            "status": "done",
+            "skipped_reason": None,
+            "faithfulness": 0.94,
+            "context_precision": 0.81,
+            "context_recall": 0.9,
+            "judge_model": "gpt-4o-mini",
+            "contexts_scored": 3,
+            "duration_ms": 5200.0,
+            "error": None,
+            "created_at": None,
+        },
+    )
+
+    body = client.get("/requests/req-1/evaluation", headers=auth()).json()
+
+    assert body["status"] == "done"
+    assert body["faithfulness"] == 0.94
+    assert body["context_precision"] == 0.81
+    assert body["context_recall"] == 0.9
+    assert body["judge_model"] == "gpt-4o-mini"
+
+
+def test_an_answered_ask_schedules_the_ragas_background_task(client, auth, graph_returns, monkeypatch):
+    monkeypatch.setattr(settings, "enable_ragas_eval", True)
+    seen = {}
+
+    async def _fake_eval(request_id, thread_id, question, answer, contexts, evidence_path):
+        seen.update(
+            request_id=request_id,
+            question=question,
+            answer=answer,
+            contexts=contexts,
+            evidence_path=evidence_path,
+        )
+
+    monkeypatch.setattr(routes.ragas_eval, "evaluate_answer", _fake_eval)
+    graph_returns(_answered_state())
+
+    body = _ask(client, auth()).json()
+
+    assert seen["request_id"] == body["request_id"]
+    assert seen["answer"] == body["answer"]
+    assert len(seen["contexts"]) == 3
+    assert seen["evidence_path"] == "rag"
 
 
 def test_slo_metrics_are_503_when_history_is_unavailable(client, auth, monkeypatch):

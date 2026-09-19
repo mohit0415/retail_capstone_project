@@ -18,6 +18,7 @@ from src.prompts.langfuse_prompts import render_prompt
 from src.prompts.library import HYBRID_ANSWER
 from src.retrieval.adapter import format_context as build_context
 from src.retrieval.citations import cite_uncited_sentences, with_inline_citations
+from src.retrieval.sibling_expansion import append_sibling_clauses
 from src.schemas.models import DraftAnswer, RetrievedChunk, SqlEvidence
 from src.sqlpath.disclosure import rows_for_prompt, with_disclosures
 from src.sqlpath.executor import sanity_check
@@ -91,9 +92,25 @@ def draft_hybrid_answer(
                 added_citations,
             )
 
+    # section completeness: siblings of a cited clause (6.1 answered, 6.2 supplied)
+    # are appended verbatim - the writer model leaves them out even when instructed
+    cited_answer, siblings = append_sibling_clauses(cited_answer, [*draft.cited_clauses, *placed], chunks)
+
+    if siblings:
+        logger.info(
+            "hybrid draft skipped %d sibling clause(s) of a cited section, appended them "
+            "request_id=%s citations=%s",
+            len(siblings),
+            state.get("request_id"),
+            siblings,
+        )
+
     if cited_answer != draft.answer:
         draft = draft.model_copy(
-            update={"answer": cited_answer, "cited_clauses": list(dict.fromkeys([*draft.cited_clauses, *placed]))}
+            update={
+                "answer": cited_answer,
+                "cited_clauses": list(dict.fromkeys([*draft.cited_clauses, *placed, *siblings])),
+            }
         )
 
     if evidence is not None:

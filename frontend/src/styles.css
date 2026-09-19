@@ -266,6 +266,12 @@ select {
   gap: 14px;
 }
 
+.grid-5 {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -1150,6 +1156,10 @@ pre.json {
 /* ---------- responsive ---------- */
 
 @media (max-width: 1100px) {
+  .grid-5 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .grid-4 {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1388,4 +1398,51 @@ pre.json {
 
 .workflow-children li {
   margin-top: 3px;
+}
+
+/* ---- RAGAS answer quality ---- */
+
+.chip.shimmer {
+  border-color: rgba(139, 124, 246, 0.35);
+  color: var(--violet-2);
+  background: linear-gradient(
+    100deg,
+    var(--panel-2) 30%,
+    rgba(139, 124, 246, 0.18) 50%,
+    var(--panel-2) 70%
+  );
+  background-size: 220% 100%;
+  animation: chip-shimmer 1.6s linear infinite;
+}
+
+@keyframes chip-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+.quality-box summary {
+  color: var(--muted);
+}
+
+.quality-row {
+  margin: 10px 0 12px;
+}
+
+.quality-row .bar {
+  margin-top: 4px;
+}
+
+.quality-row .bar > span {
+  transition: width 0.5s ease;
+}
+
+.quality-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.8;
 }

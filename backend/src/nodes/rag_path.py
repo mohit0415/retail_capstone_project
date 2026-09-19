@@ -36,6 +36,7 @@ from src.retrieval.citations import (
     with_inline_citations,
 )
 from src.retrieval.hybrid_search import retrieve_policy_evidence
+from src.retrieval.sibling_expansion import append_sibling_clauses
 from src.schemas.enums import EvidencePath
 from src.schemas.models import DraftAnswer, RetrievedChunk
 
@@ -185,10 +186,23 @@ def _cite_every_sentence(state: AgentState, draft: DraftAnswer, chunks: list[Ret
             added,
         )
 
+    # section completeness: siblings of a cited clause (6.1 answered, 6.2 supplied)
+    # are appended verbatim - the writer model leaves them out even when instructed
+    answer, siblings = append_sibling_clauses(answer, [*draft.cited_clauses, *attached], chunks)
+
+    if siblings:
+        logger.info(
+            "rag draft skipped %d sibling clause(s) of a cited section, appended them "
+            "request_id=%s citations=%s",
+            len(siblings),
+            state.get("request_id"),
+            siblings,
+        )
+
     if answer == draft.answer:
         return draft
 
-    cited = list(dict.fromkeys([*draft.cited_clauses, *attached]))
+    cited = list(dict.fromkeys([*draft.cited_clauses, *attached, *siblings]))
 
     return draft.model_copy(update={"answer": answer, "cited_clauses": cited})
 

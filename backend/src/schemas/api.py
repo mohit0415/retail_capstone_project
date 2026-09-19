@@ -339,6 +339,78 @@ class SloReport(BaseModel):
     evidence_paths: list[SloPathLatency] = Field(default_factory=list)
 
 
+class RequestEvaluation(BaseModel):
+    """RAGAS answer-quality scores for one request (scored in the background)."""
+
+    status: str  # pending | done | skipped | error
+    request_id: str
+    evidence_path: str | None = None
+    skipped_reason: str | None = None
+    faithfulness: float | None = None
+    # binary AspectCritic verdict: is the answer accurate against the retrieved clauses
+    answer_accuracy: float | None = None
+    context_precision: float | None = None
+    context_recall: float | None = None
+    # context_recall is measured against the generated answer - a live request
+    # has no golden reference; true recall lives in the offline golden-set eval
+    recall_basis: str = "generated_answer"
+    judge_model: str | None = None
+    contexts_scored: int = 0
+    duration_ms: float | None = None
+    error: str | None = None
+
+
+class RagasMetricSummary(BaseModel):
+    metric: str
+    mean: float | None = None
+    p50: float | None = None
+    target_mean: float
+    meets_target: bool | None = None
+
+
+class RagasRecentEvaluation(BaseModel):
+    request_id: str
+    evidence_path: str | None = None
+    status: str
+    faithfulness: float | None = None
+    answer_accuracy: float | None = None
+    context_precision: float | None = None
+    context_recall: float | None = None
+    created_at: str
+
+
+class RagasReport(BaseModel):
+    """Rolling answer-quality aggregates for the SLO page."""
+
+    window_hours: int
+    scored: int
+    skipped: int
+    failed: int
+    metrics: list[RagasMetricSummary] = Field(default_factory=list)
+    low_faithfulness_count: int = 0
+    low_faithfulness_rate: float | None = None
+    low_faithfulness_ceiling: float
+    recall_basis: str = "generated_answer"
+    recent: list[RagasRecentEvaluation] = Field(default_factory=list)
+
+
+class LangfuseLatencyReport(BaseModel):
+    """Trace latency percentiles read back from the Langfuse portal."""
+
+    enabled: bool
+    host: str
+    window_hours: int
+    trace_name: str
+    trace_count: int | None = None
+    p50_ms: float | None = None
+    p95_ms: float | None = None
+    # token consumption per trace (the cost-in-tokens view) and summed USD cost
+    total_tokens_p95: float | None = None
+    total_tokens_max: float | None = None
+    total_cost_usd: float | None = None
+    error: str | None = None
+
+
 class OptimizationReport(BaseModel):
     """Cost and latency optimisation evidence: cache effectiveness, routing mix, spend."""
 

@@ -3,7 +3,7 @@
 // conversation history by thread_id, this is only what the UI shows).
 
 import { v4 as uuidv4 } from 'uuid'
-import type { AskResponse, RequestStatus } from './types'
+import type { AskResponse, RequestEvaluation, RequestStatus } from './types'
 
 export type MsgKind = 'answer' | 'pending' | 'refused' | 'clarification' | 'error'
 
@@ -18,6 +18,8 @@ export interface Message {
   poll?: RequestStatus
   polledAt?: number // when the user last pressed "Check status"
   releasedAnswer?: string
+  evaluation?: RequestEvaluation // RAGAS quality scores, fetched after the answer
+  evaluationDone?: boolean // stop showing the "scoring…" shimmer (scored, or gave up)
 }
 
 export interface Thread {

@@ -47,6 +47,7 @@ dependencies = [
     "duckduckgo-mcp-server>=0.7.0",
     "python-jose[cryptography]>=3.5.0",
     "requests>=2.32.0",
+    "ragas>=0.4.3",
 ]
 
 [project.optional-dependencies]

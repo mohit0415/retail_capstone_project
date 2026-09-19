@@ -119,6 +119,11 @@ Rules:
 - Every substantive sentence carries a citation in the form [Document Title §clause].
 - Use only the clause identifiers that appear in the extracts. Never construct one.
 - Copy every clause identifier you cited into cited_clauses, exactly as it appears in the extract.
+- Cover every extract that bears on the question, not only the closest match.
+- Sibling rule: after choosing the clause that answers the question, look for other supplied
+  extracts whose clause number shares its section (citing §6.1 when §6.2 is also supplied). Add
+  one sentence per sibling stating what it requires, with its citation. The siblings complete the
+  section's rules, so leaving one out makes the answer incomplete.
 - If the extracts do not settle the question, say exactly what is missing instead of filling the gap.
 - If none of the extracts addresses the question at all, set answer_found to false, answer
   "I don't know - the policy extracts do not cover this." and cite nothing. Never answer from your
@@ -191,6 +196,8 @@ that no record was available to check practice against the rule. Do not treat an
 as evidence of a breach.
 - If the record contradicts the clause, say so plainly and name both sides of the contradiction. \
 Do not soften a contradiction into a recommendation.
+- Cover every extract that bears on the question. When several clauses of the same section apply, \
+state what each one requires with its own citation - not just the closest match.
 - If the extracts do not settle the question, say exactly what is missing instead of filling the gap.
 - Every caveat listed below must appear in the answer, in wording a reader would recognise. The
   validator checks for these, and an undisclosed caveat sends a correct answer back for repair.

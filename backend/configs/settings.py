@@ -147,10 +147,20 @@ class Settings(BaseSettings):
     slo_path_target_ratio: float = 0.85
     slo_window_hours: int = 24
 
+    # per-request RAGAS answer-quality scoring (background task after /ask)
+    enable_ragas_eval: bool = True
+
     retrieval_top_k: int = 20
     rerank_top_n: int = 6
     rrf_k: int = 60
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # sibling-clause expansion: a top-ranked clause "6.1" pulls in its current
+    # "6.x" siblings so a numbered section reaches the writer complete even when
+    # the cross-encoder cuts the clauses whose meaning lives in their heading
+    enable_sibling_expansion: bool = True
+    sibling_expansion_seeds: int = 2
+    max_sibling_clauses: int = 4
 
     as_of_date: date = date(2025, 12, 31)
 

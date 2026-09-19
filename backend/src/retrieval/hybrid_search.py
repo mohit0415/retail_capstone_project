@@ -14,6 +14,7 @@ from src.retrieval.postprocessors import (
     KeepTopN,
     build_reranker,
 )
+from src.retrieval.sibling_expansion import expand_sibling_clauses
 from src.schemas.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,10 @@ def retrieve_policy_evidence(
     rerank_ms = (time.perf_counter() - rerank_started) * 1000
 
     chunks = to_retrieved_chunks(nodes, fused, reranked)
+
+    if settings.enable_sibling_expansion:
+        chunks = expand_sibling_clauses(chunks, allowed_doc_types)
+
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     logger.info(

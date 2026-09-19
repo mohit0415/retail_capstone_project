@@ -346,6 +346,67 @@ export interface SloReport {
   }[]
 }
 
+// RAGAS quality scores for one answer (scored in the background after /ask)
+export interface RequestEvaluation {
+  status: 'pending' | 'done' | 'skipped' | 'error'
+  request_id: string
+  evidence_path?: string | null
+  skipped_reason?: string | null
+  faithfulness?: number | null
+  answer_accuracy?: number | null
+  context_precision?: number | null
+  context_recall?: number | null
+  recall_basis?: string
+  judge_model?: string | null
+  contexts_scored?: number
+  duration_ms?: number | null
+  error?: string | null
+}
+
+export interface RagasMetricSummary {
+  metric: string
+  mean: number | null
+  p50: number | null
+  target_mean: number
+  meets_target: boolean | null
+}
+
+export interface RagasReport {
+  window_hours: number
+  scored: number
+  skipped: number
+  failed: number
+  metrics: RagasMetricSummary[]
+  low_faithfulness_count: number
+  low_faithfulness_rate: number | null
+  low_faithfulness_ceiling: number
+  recall_basis: string
+  recent: {
+    request_id: string
+    evidence_path: string | null
+    status: string
+    faithfulness: number | null
+    answer_accuracy: number | null
+    context_precision: number | null
+    context_recall: number | null
+    created_at: string
+  }[]
+}
+
+export interface LangfuseLatencyReport {
+  enabled: boolean
+  host: string
+  window_hours: number
+  trace_name: string
+  trace_count: number | null
+  p50_ms: number | null
+  p95_ms: number | null
+  total_tokens_p95: number | null
+  total_tokens_max: number | null
+  total_cost_usd: number | null
+  error: string | null
+}
+
 export interface OptimizationReport {
   generated_at: string
   caches: Record<string, unknown>
