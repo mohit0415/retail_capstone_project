@@ -780,7 +780,7 @@ def test_a_privacy_answer_from_the_old_whole_document_index_is_released(memory_g
     }
 
     monkeypatch.setattr(llms, "_build_chat_model", lambda spec, temperature: SequencedChatModel(spec.model, answers, log))
-    monkeypatch.setattr(rag_path_module, "retrieve_policy_evidence", lambda **kwargs: ([_privacy_chunk()], True, []))
+    monkeypatch.setattr(rag_path_module, "retrieve_policy_evidence", lambda **kwargs: ([_privacy_chunk()], True, [], []))
     monkeypatch.setattr(router_module, "routing_stats", RoutingStats())
     monkeypatch.setattr(settings, "model_routing_strategy", "heuristic")
     monkeypatch.setattr(settings, "use_model_routing_yaml", False)

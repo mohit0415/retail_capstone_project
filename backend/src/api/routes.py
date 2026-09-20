@@ -48,11 +48,13 @@ from src.ingestion.bootstrap import corpus_dir, corpus_is_indexed, unindexed_fil
 from src.ingestion.pipeline import ingest_directory, ingest_file
 from src.llm_routing.ledger import cost_ledger
 from src.llm_routing.router import routing_report
+from src.nodes.nl2sql_path import NARRATION_MAX_ROWS
 from src.observability import langfuse_metrics, ragas_eval, slo
 from src.observability.agent_steps import build_agent_steps
 from src.observability.langfuse_callback import flush_langfuse_traces, setup_langfuse_callback
 from src.observability.logging_config import bind_request_context, reset_request_context
 from src.observability.tracing import get_callback_handlers
+from src.retrieval.adapter import provenance_text
 from src.retrieval.citations import citable_citation_texts, citable_clauses
 from src.schemas.api import (
     AnswerResponse,
@@ -85,6 +87,7 @@ from src.schemas.api import (
 )
 from src.schemas.enums import ReviewDecision, RiskLevel, TerminalOutcome
 from src.schemas.models import DraftAnswer, RetrievedChunk
+from src.sqlpath.disclosure import rows_for_prompt
 
 router = APIRouter()
 
@@ -785,6 +788,22 @@ def _ask(
     )
 
     if settings.enable_ragas_eval and not body.get("not_found"):
+        # prefix each chunk with its provenance: the answer cites clauses as
+        # "[Title §N]", and a judge given bare text counts that citation as an
+        # unsupported claim, deflating faithfulness on every request
+        eval_contexts = [provenance_text(chunk) for chunk in final_state.get("retrieved_chunks", [])]
+
+        # the hybrid and nl2sql writers read the SQL rows alongside the clauses, so the
+        # judge must too: judged on the clauses alone, every record figure in the answer
+        # counts as an unsupported claim, and a pure records answer cannot be scored at all
+        sql_evidence = final_state.get("sql_evidence")
+
+        if sql_evidence is not None:
+            eval_contexts.append(
+                f"[Compliance Records query {sql_evidence.template_id}] (as of {sql_evidence.as_of}): "
+                + rows_for_prompt(sql_evidence, NARRATION_MAX_ROWS, with_query=True)
+            )
+
         # scored after the response is already on the wire; the frontend picks the
         # result up lazily via GET /requests/{request_id}/evaluation
         background.add_task(
@@ -793,14 +812,10 @@ def _ask(
             thread_id,
             final_state.get("standalone_query") or payload.query,
             draft.answer,
-            # prefix each chunk with its provenance: the answer cites clauses as
-            # "[Title §N]", and a judge given bare text counts that citation as an
-            # unsupported claim, deflating faithfulness on every request
-            [
-                f"{chunk.citation} ({chunk.section}): {chunk.content}" if chunk.section else f"{chunk.citation}: {chunk.content}"
-                for chunk in final_state.get("retrieved_chunks", [])
-            ],
+            eval_contexts,
             final_state.get("evidence_path"),
+            # raw pre-rerank candidates: retrieval precision is judged on these
+            candidate_contexts=final_state.get("retrieval_candidates") or None,
         )
 
     idempotency_store.put(cache_key, body, status.HTTP_200_OK)
@@ -880,6 +895,7 @@ def request_evaluation(request_id: str, principal: Principal = Depends(current_p
         evidence_path=row["evidence_path"],
         skipped_reason=row["skipped_reason"],
         faithfulness=row["faithfulness"],
+        answer_accuracy=row["answer_accuracy"],
         context_precision=row["context_precision"],
         context_recall=row["context_recall"],
         judge_model=row["judge_model"],

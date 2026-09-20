@@ -46,7 +46,7 @@ def _rescue_policy_question(state: AgentState, result: IntentResult) -> tuple[In
     try:
         # scoped to the chosen policies when there are any - the same search, and the same retrieval
         # cache entry, that rag_path runs next
-        chunks, _skipped = gather_policy_evidence(state)
+        chunks, _skipped, _candidates = gather_policy_evidence(state)
     except Exception:
         logger.warning(
             "out-of-scope check against the policy corpus failed, refusing request_id=%s",

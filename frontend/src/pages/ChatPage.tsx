@@ -80,23 +80,25 @@ function riskClass(level?: string) {
 
 // ----- RAGAS answer quality (scored in the background, fetched lazily) -----
 
-const EVAL_RETRY_DELAYS_MS = [3000, 5000, 8000, 12000]
+// the judge now runs four metric chains (faithfulness, accuracy, precision, recall)
+// and long answers take it 30-40s, so the polling window must comfortably outlast it
+const EVAL_RETRY_DELAYS_MS = [3000, 5000, 8000, 12000, 15000, 20000, 20000, 25000]
 
 const QUALITY_METRICS = [
   {
     key: 'faithfulness',
     label: 'faithfulness',
-    hint: 'How many of the claims in this answer are supported by the retrieved clauses.',
+    hint: 'How many of the claims in this answer are supported by the evidence the writer read: the retrieved clauses, plus the SQL record rows on the hybrid and records routes.',
   },
   {
     key: 'answer_accuracy',
     label: 'accuracy',
-    hint: 'A yes/no judge verdict: does the answer correctly answer the question, with every factual statement backed by the retrieved clauses.',
+    hint: 'A yes/no judge verdict: does the answer correctly answer the question, with every factual statement backed by the retrieved clauses and record rows.',
   },
   {
     key: 'context_precision',
     label: 'precision',
-    hint: 'How many of the retrieved clauses were actually relevant to this answer.',
+    hint: 'Retrieval precision: how much of the raw top-k retrieval (before the reranker filtered it) was actually relevant. Judged on the unfiltered candidates, so it reflects retrieval quality, not the filter.',
   },
   {
     key: 'context_recall',

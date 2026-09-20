@@ -353,7 +353,7 @@ def test_retrieval_cache_hands_out_copies_so_later_mutation_does_not_leak():
     key = retrieval_key("q", ["retention_policy"], None, "2025-12-31", 20, 6, True)
     original = [_chunk("4.2")]
 
-    cache.put(key, (original, True, []), elapsed_ms=120.0)
+    cache.put(key, (original, True, [], []), elapsed_ms=120.0)
     first = cache.get(key)
     first[0][0].rerank_score = 0.99
     second = cache.get(key)
@@ -368,7 +368,7 @@ def test_retrieval_cache_does_not_store_empty_results():
     cache = RetrievalCache(max_entries=5, ttl_seconds=60)
     key = retrieval_key("q", ["retention_policy"], None, "2025-12-31", 20, 6, True)
 
-    cache.put(key, ([], False, []), elapsed_ms=5.0)
+    cache.put(key, ([], False, [], []), elapsed_ms=5.0)
 
     assert cache.get(key) is None
     assert len(cache) == 0

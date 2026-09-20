@@ -28,11 +28,18 @@ def retrieve_policy_evidence(
     top_k: int | None = None,
     top_n: int | None = None,
     use_rerank: bool = True,
-) -> tuple[list[RetrievedChunk], bool, list[str]]:
+) -> tuple[list[RetrievedChunk], bool, list[str], list[RetrievedChunk]]:
+    """Returns (kept chunks, fused?, skipped optimisations, raw candidates).
+
+    The raw candidates are the current-version fusion results BEFORE the
+    reranker cut - the set RAGAS retrieval precision is judged on, because
+    precision measured after the cross-encoder has already filtered the list
+    can only ever say the filter works, not that retrieval is precise.
+    """
     if not allowed_doc_types:
         logger.info("retrieval skipped: no document type in scope")
 
-        return [], False, []
+        return [], False, [], []
 
     as_of = as_of or settings.as_of_date
     top_n = top_n or settings.rerank_top_n
@@ -51,7 +58,7 @@ def retrieve_policy_evidence(
         retriever, fused = build_fusion_retriever(allowed_doc_types, doc_scope, top_k)
     except Exception as exc:
         logger.error("retriever construction failed: %s", exc, exc_info=True)
-        return [], False, []
+        return [], False, [], []
 
     bundle = QueryBundle(query_str=query)
 
@@ -59,11 +66,12 @@ def retrieve_policy_evidence(
         nodes = retriever.retrieve(bundle)
     except Exception as exc:
         logger.error("retrieval failed: %s", exc, exc_info=True)
-        return [], fused, []
+        return [], fused, [], []
 
     candidates = len(nodes)
     nodes = CurrentVersionFilter(as_of=str(as_of)).postprocess_nodes(nodes, query_bundle=bundle)
     current = len(nodes)
+    raw_candidates = to_retrieved_chunks(nodes, fused)
 
     skipped: list[str] = []
 
@@ -101,7 +109,7 @@ def retrieve_policy_evidence(
         elapsed_ms,
     )
 
-    result = (chunks, fused, skipped)
+    result = (chunks, fused, skipped, raw_candidates)
 
     if settings.enable_retrieval_cache:
         retrieval_cache.put(key, result, elapsed_ms)
@@ -116,7 +124,7 @@ def hybrid_retrieve(
     as_of: date | None = None,
     top_k: int | None = None,
 ) -> list[RetrievedChunk]:
-    chunks, _, _ = retrieve_policy_evidence(
+    chunks, _, _, _ = retrieve_policy_evidence(
         query=query,
         allowed_doc_types=allowed_doc_types,
         doc_scope=doc_scope,
@@ -132,7 +140,7 @@ def widen_retrieval(
     allowed_doc_types: list[str],
     as_of: date | None = None,
 ) -> list[RetrievedChunk]:
-    chunks, _, _ = retrieve_policy_evidence(
+    chunks, _, _, _ = retrieve_policy_evidence(
         query=query,
         allowed_doc_types=allowed_doc_types,
         doc_scope=None,

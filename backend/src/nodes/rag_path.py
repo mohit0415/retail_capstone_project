@@ -27,7 +27,7 @@ from src.guardrails.output_guard import CITATION_PATTERN
 from src.observability.tracing import runnable_config, traced_node
 from src.prompts.langfuse_prompts import render_prompt
 from src.prompts.library import RAG_ANSWER
-from src.retrieval.adapter import format_context
+from src.retrieval.adapter import format_context, provenance_text
 from src.retrieval.citations import (
     cite_uncited_sentences,
     cites_retrieved_clause,
@@ -73,7 +73,9 @@ def is_repair_pass(state: AgentState) -> bool:
     return bool(state.get("reflection_count")) and bool(state.get("replan_directive"))
 
 
-def gather_policy_evidence(state: AgentState, widen: bool = False) -> tuple[list[RetrievedChunk], list[str]]:
+def gather_policy_evidence(
+    state: AgentState, widen: bool = False
+) -> tuple[list[RetrievedChunk], list[str], list[RetrievedChunk]]:
     documents = allowed_doc_types(state.get("access_scopes", []))
     # a repair searches every document the role can read, with more candidates, because
     # repeating the first search returns exactly the extracts that produced the defects
@@ -92,7 +94,7 @@ def gather_policy_evidence(state: AgentState, widen: bool = False) -> tuple[list
 
     started = time.perf_counter()
 
-    chunks, _, skipped = retrieve_policy_evidence(
+    chunks, _, skipped, raw_candidates = retrieve_policy_evidence(
         query=state["standalone_query"],
         allowed_doc_types=documents,
         doc_scope=scope,
@@ -127,7 +129,7 @@ def gather_policy_evidence(state: AgentState, widen: bool = False) -> tuple[list
             scope or "all",
         )
 
-    return chunks, skipped
+    return chunks, skipped, raw_candidates
 
 
 def _nothing_matched(state: AgentState, chunks: list[RetrievedChunk]) -> bool:
@@ -211,10 +213,12 @@ def _cite_every_sentence(state: AgentState, draft: DraftAnswer, chunks: list[Ret
 def rag_path_node(state: AgentState) -> dict:
     route = current_route(state)
     repairing = is_repair_pass(state)
-    chunks, skipped = gather_policy_evidence(state, widen=repairing)
+    chunks, skipped, raw_candidates = gather_policy_evidence(state, widen=repairing)
 
     gathered = {
         "retrieved_chunks": chunks,
+        # what fusion returned BEFORE the reranker cut, for RAGAS retrieval precision
+        "retrieval_candidates": [provenance_text(c) for c in raw_candidates],
         "evidence_path": route,
         "degraded": bool(skipped) or state.get("degraded", False),
         "skipped_optional_nodes": skipped,

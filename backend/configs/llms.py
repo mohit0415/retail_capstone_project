@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -284,6 +284,23 @@ def _build_chat_model(spec: ProviderSpec, temperature: float) -> BaseChatModel:
 
 def model_for_tier(tier: ModelTier | str, temperature: float = 0.0) -> BaseChatModel:
     return _build_chat_model(provider_spec_for(tier), temperature)
+
+
+def model_for_long_output(node_name: str, timeout_seconds: float) -> BaseChatModel:
+    """The fixed-tier model for ``node_name`` with one long attempt instead of short retries.
+
+    Narrating a wide SQL result is a completion of thousands of tokens; under the default
+    ``llm_timeout_seconds`` every attempt was aborted mid-stream and the retries only
+    repeated the abort (3 x 20 s = 63 s spent to produce nothing). One attempt sized to
+    the caller's remaining budget either finishes or fails once, quickly.
+    """
+    spec = replace(
+        provider_spec_for(tier_for(node_name)),
+        timeout=int(max(5.0, timeout_seconds)),
+        max_retries=0,
+    )
+
+    return _build_chat_model(spec, TEMPERATURE_FOR_NODE.get(node_name, 0.0))
 
 
 def model_for(node_name: str) -> BaseChatModel:

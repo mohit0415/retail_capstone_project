@@ -27,7 +27,7 @@ from src.schemas.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-RetrievalValue = tuple[list[RetrievedChunk], bool, list[str]]
+RetrievalValue = tuple[list[RetrievedChunk], bool, list[str], list[RetrievedChunk]]
 
 
 def retrieval_key(
@@ -65,7 +65,7 @@ class RetrievalCache:
         if entry is None:
             return None
 
-        chunks, fused, skipped = entry.value
+        chunks, fused, skipped, candidates = entry.value
         self.saved_ms += float(entry.meta.get("elapsed_ms", 0.0))
 
         logger.info(
@@ -76,10 +76,15 @@ class RetrievalCache:
             _preview(key[0]),
         )
 
-        return [chunk.model_copy(deep=True) for chunk in chunks], fused, list(skipped)
+        return (
+            [chunk.model_copy(deep=True) for chunk in chunks],
+            fused,
+            list(skipped),
+            [chunk.model_copy(deep=True) for chunk in candidates],
+        )
 
     def put(self, key: tuple, value: RetrievalValue, elapsed_ms: float) -> None:
-        chunks, fused, skipped = value
+        chunks, fused, skipped, candidates = value
 
         if not chunks:
             logger.debug("retrieval cache: not storing an empty result for %r", _preview(key[0]))
@@ -88,7 +93,12 @@ class RetrievalCache:
 
         self._store.put(
             key,
-            ([chunk.model_copy(deep=True) for chunk in chunks], fused, list(skipped)),
+            (
+                [chunk.model_copy(deep=True) for chunk in chunks],
+                fused,
+                list(skipped),
+                [chunk.model_copy(deep=True) for chunk in candidates],
+            ),
             meta={"elapsed_ms": float(elapsed_ms)},
         )
         logger.debug(

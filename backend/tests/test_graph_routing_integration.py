@@ -89,7 +89,7 @@ def graph(memory_graph, monkeypatch):
 
     # ``_build_chat_model`` takes a ``ProviderSpec``; the deployment name is ``spec.model``.
     monkeypatch.setattr(llms, "_build_chat_model", lambda spec, temperature: FakeChatModel(spec.model, calls))
-    monkeypatch.setattr(rag_path_module, "retrieve_policy_evidence", lambda **kwargs: ([_chunk()], True, []))
+    monkeypatch.setattr(rag_path_module, "retrieve_policy_evidence", lambda **kwargs: ([_chunk()], True, [], []))
     monkeypatch.setattr(router_module, "routing_stats", RoutingStats())
     monkeypatch.setattr(settings, "model_routing_strategy", "heuristic")
     monkeypatch.setattr(settings, "use_model_routing_yaml", False)

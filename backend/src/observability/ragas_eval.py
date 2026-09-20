@@ -3,13 +3,18 @@
 Every certified answer is scored in the background (``BackgroundTasks`` after
 ``/ask`` has already responded) on four RAGAS metrics:
 
-* ``faithfulness`` - are the claims in the answer supported by the retrieved
-  clauses;
+* ``faithfulness`` - are the claims in the answer supported by the evidence the
+  writer read: the retrieved clauses plus, on the hybrid and nl2sql routes, the
+  SQL rows. The judge must see exactly what the generator saw - judged on the
+  clauses alone, every record figure counts as an unsupported claim;
 * ``answer_accuracy`` - a binary RAGAS ``AspectCritic`` verdict: does the
   answer correctly answer the question with every factual statement agreeing
   with the retrieved clauses. The rolling mean is the accuracy rate;
-* ``context_precision`` - are the retrieved clauses actually relevant to the
-  answer (``LLMContextPrecisionWithoutReference``: no golden answer needed);
+* ``context_precision`` - retrieval precision, judged on the RAW fusion
+  candidates (before the reranker cut) when the request provides them.
+  Judged on the final curated contexts it can only ever say the reranker
+  works; judged on the raw top-k it says how precise retrieval itself is
+  (``LLMContextPrecisionWithoutReference``: no golden answer needed);
 * ``context_recall`` - did retrieval bring back the clauses the answer needed.
   True recall needs a ground-truth reference, which a live request does not
   have, so the generated answer stands in as the reference. The UI labels it
@@ -42,7 +47,9 @@ METRIC_TIMEOUT_SECONDS = 90.0
 QUALITY_TARGETS = {
     "faithfulness": 0.85,
     "answer_accuracy": 0.90,
-    "context_precision": 0.75,
+    # judged on the raw pre-rerank candidates, so the realistic bar is lower
+    # than it was when the already-filtered contexts were being scored
+    "context_precision": 0.60,
     "context_recall": 0.80,
 }
 
@@ -120,7 +127,9 @@ def _clean(score) -> float | None:
     return round(min(1.0, max(0.0, value)), 4)
 
 
-async def _score_metrics(question: str, answer: str, contexts: list[str]) -> dict[str, float | None]:
+async def _score_metrics(
+    question: str, answer: str, contexts: list[str], precision_contexts: list[str] | None = None
+) -> dict[str, float | None]:
     from ragas import SingleTurnSample
     from ragas.llms import LangchainLLMWrapper
     from ragas.metrics import (
@@ -139,19 +148,31 @@ async def _score_metrics(question: str, answer: str, contexts: list[str]) -> dic
         # recall proxy: the certified answer stands in for the missing golden reference
         reference=answer,
     )
+    # retrieval precision is judged on the raw pre-rerank candidates; the curated
+    # final contexts would only ever measure that the reranker filters well
+    precision_sample = SingleTurnSample(
+        user_input=question,
+        response=answer,
+        retrieved_contexts=precision_contexts or contexts,
+    )
 
     metrics = {
-        "faithfulness": Faithfulness(llm=judge),
-        "answer_accuracy": AspectCritic(name="answer_accuracy", definition=ACCURACY_DEFINITION, llm=judge),
-        "context_precision": LLMContextPrecisionWithoutReference(llm=judge),
-        "context_recall": LLMContextRecall(llm=judge),
+        "faithfulness": (Faithfulness(llm=judge), sample),
+        "answer_accuracy": (
+            AspectCritic(name="answer_accuracy", definition=ACCURACY_DEFINITION, llm=judge),
+            sample,
+        ),
+        "context_precision": (LLMContextPrecisionWithoutReference(llm=judge), precision_sample),
+        "context_recall": (LLMContextRecall(llm=judge), sample),
     }
 
     scores: dict[str, float | None] = {}
 
-    for name, metric in metrics.items():
+    for name, (metric, metric_sample) in metrics.items():
         try:
-            raw = await asyncio.wait_for(metric.single_turn_ascore(sample), timeout=METRIC_TIMEOUT_SECONDS)
+            raw = await asyncio.wait_for(
+                metric.single_turn_ascore(metric_sample), timeout=METRIC_TIMEOUT_SECONDS
+            )
             scores[name] = _clean(raw)
         except Exception as exc:
             logger.warning("ragas metric %s failed: %s", name, str(exc)[:200])
@@ -175,6 +196,7 @@ async def evaluate_answer(
     answer: str,
     contexts: list[str],
     evidence_path: str | None,
+    candidate_contexts: list[str] | None = None,
 ) -> None:
     """Score one certified answer and store the result. Never raises."""
     started = time.monotonic()
@@ -199,9 +221,10 @@ async def evaluate_answer(
     # records: ..."), which measurably destabilises the judge's NLI verdicts -
     # collapse whitespace before scoring
     contexts = [re.sub(r"\s+", " ", c).strip() for c in contexts if c and c.strip()]
+    candidates = [re.sub(r"\s+", " ", c).strip() for c in (candidate_contexts or []) if c and c.strip()]
 
     if not contexts:
-        # a pure record answer (nl2sql with no retrieved clauses) has nothing to ground against
+        # no clauses AND no SQL rows (the caller passes both): nothing to ground against
         base.update(status="skipped", skipped_reason="no_retrieved_contexts", contexts_scored=0)
         _store(base)
 
@@ -214,7 +237,7 @@ async def evaluate_answer(
         return
 
     try:
-        scores = await _score_metrics(question, answer, contexts)
+        scores = await _score_metrics(question, answer, contexts, precision_contexts=candidates or None)
     except Exception as exc:
         logger.error("ragas evaluation failed request_id=%s: %s", request_id, str(exc)[:300])
         base.update(

@@ -132,7 +132,11 @@ def _ask(client, headers, query="What is the retention period for customer invoi
     return client.post("/ask", json={"query": query, **extra}, headers=headers)
 
 
-def test_auth_me_returns_the_role_its_scopes_and_its_screens(client, auth):
+def test_auth_me_returns_the_role_its_scopes_and_its_screens(client, auth, monkeypatch):
+    # azure_configured must reflect the unconfigured state, not whatever
+    # AZURE_OPENAI_* the host's .env happens to hold when the suite runs
+    monkeypatch.setattr(settings, "azure_openai_api_key", "")
+
     response = client.get("/auth/me", headers=auth(Role.STORE_MANAGER, user_id="auth0|u1", departments=["Finance"]))
 
     assert response.status_code == 200
@@ -1436,6 +1440,7 @@ def test_a_request_evaluation_returns_the_stored_scores(client, auth, monkeypatc
             "status": "done",
             "skipped_reason": None,
             "faithfulness": 0.94,
+            "answer_accuracy": 1.0,
             "context_precision": 0.81,
             "context_recall": 0.9,
             "judge_model": "gpt-4o-mini",
@@ -1450,6 +1455,8 @@ def test_a_request_evaluation_returns_the_stored_scores(client, auth, monkeypatc
 
     assert body["status"] == "done"
     assert body["faithfulness"] == 0.94
+    # the accuracy verdict must survive the endpoint's field-by-field construction
+    assert body["answer_accuracy"] == 1.0
     assert body["context_precision"] == 0.81
     assert body["context_recall"] == 0.9
     assert body["judge_model"] == "gpt-4o-mini"
@@ -1459,7 +1466,7 @@ def test_an_answered_ask_schedules_the_ragas_background_task(client, auth, graph
     monkeypatch.setattr(settings, "enable_ragas_eval", True)
     seen = {}
 
-    async def _fake_eval(request_id, thread_id, question, answer, contexts, evidence_path):
+    async def _fake_eval(request_id, thread_id, question, answer, contexts, evidence_path, candidate_contexts=None):
         seen.update(
             request_id=request_id,
             question=question,
@@ -1477,6 +1484,39 @@ def test_an_answered_ask_schedules_the_ragas_background_task(client, auth, graph
     assert seen["answer"] == body["answer"]
     assert len(seen["contexts"]) == 3
     assert seen["evidence_path"] == "rag"
+
+
+def test_the_ragas_contexts_include_the_sql_rows_the_writer_read(client, auth, graph_returns, monkeypatch):
+    """The judge must see exactly what the generator saw: on the hybrid and nl2sql
+    routes that includes the SQL rows, or every record figure in the answer is
+    scored as an unsupported claim."""
+    monkeypatch.setattr(settings, "enable_ragas_eval", True)
+    seen = {}
+
+    async def _fake_eval(request_id, thread_id, question, answer, contexts, evidence_path, candidate_contexts=None):
+        seen.update(contexts=contexts, evidence_path=evidence_path)
+
+    monkeypatch.setattr(routes.ragas_eval, "evaluate_answer", _fake_eval)
+
+    evidence = SqlEvidence(
+        template_id="vendor_status_by_name",
+        statement="SELECT ... WHERE name = %(name)s",
+        parameters={"name": "Acme"},
+        row_count=1,
+        rows=[{"name": "Acme", "status": "approved"}],
+        as_of=settings.as_of_date,
+    )
+    graph_returns(_answered_state(sql_evidence=evidence, evidence_path="hybrid"))
+
+    _ask(client, auth())
+
+    assert seen["evidence_path"] == "hybrid"
+    # the three clause contexts plus one SQL-evidence context, rows included
+    assert len(seen["contexts"]) == 4
+    sql_context = seen["contexts"][-1]
+    assert sql_context.startswith("[Compliance Records query vendor_status_by_name]")
+    assert "row_count=1" in sql_context
+    assert "Acme" in sql_context
 
 
 def test_slo_metrics_are_503_when_history_is_unavailable(client, auth, monkeypatch):

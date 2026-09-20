@@ -346,7 +346,7 @@ def test_the_rag_repair_pass_searches_wider_and_hands_the_defects_to_the_writer(
     def _retrieve(**kwargs):
         searched.update(kwargs)
 
-        return [_chunk()], True, []
+        return [_chunk()], True, [], []
 
     class _Model:
         def with_structured_output(self, _schema):
@@ -719,7 +719,7 @@ def test_confidence_breakdown_of_a_not_found_answer_is_low():
 def test_the_rag_path_does_not_write_a_draft_when_nothing_matched(monkeypatch, no_db, no_tracing):
     from src.nodes import rag_path
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([_chunk(score=0.004)], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([_chunk(score=0.004)], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", lambda node, state: pytest.fail("answer model called on a no-match"))
 
     result = rag_path.rag_path_node(base_state(query="What is the parking reimbursement limit for store staff?"))

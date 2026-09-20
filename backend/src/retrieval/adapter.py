@@ -111,6 +111,18 @@ def to_retrieved_chunks(
     return chunks
 
 
+def provenance_text(chunk: RetrievedChunk) -> str:
+    """One chunk as the RAGAS judge should see it: provenance first, then body.
+
+    A judge given bare text counts the answer's citation markers ("[Title §N]")
+    as unsupported claims, deflating faithfulness on every request.
+    """
+    if chunk.section:
+        return f"{chunk.citation} ({chunk.section}): {chunk.content}"
+
+    return f"{chunk.citation}: {chunk.content}"
+
+
 def format_context(chunks: list[RetrievedChunk]) -> str:
     from src.guardrails.injection import neutralise_retrieved
     from src.retrieval.citations import sub_clause_headings

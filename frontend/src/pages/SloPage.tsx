@@ -26,9 +26,9 @@ function num(v: unknown, digits = 0) {
 }
 
 const QUALITY_LABELS: Record<string, string> = {
-  faithfulness: 'faithfulness — claims supported by the retrieved clauses',
+  faithfulness: 'faithfulness — claims supported by the retrieved clauses and record rows',
   answer_accuracy: 'accuracy — judge verdict that the answer is correct (share of accurate answers)',
-  context_precision: 'context precision — retrieved clauses relevant to the answer',
+  context_precision: 'retrieval precision — relevant share of the raw pre-rerank candidates',
   context_recall: 'context recall — needed clauses retrieved (vs generated answer)',
 }
 

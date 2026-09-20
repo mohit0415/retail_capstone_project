@@ -57,6 +57,9 @@ class AgentState(TypedDict, total=False):
     evidence_path: str | None
 
     retrieved_chunks: Annotated[list[RetrievedChunk], merge_chunks]
+    # fusion results before the reranker cut, as provenance-prefixed text -
+    # what RAGAS retrieval precision is judged on
+    retrieval_candidates: list[str]
     sql_evidence: SqlEvidence | None
     sql_failure: str
     panel_verdict: PanelVerdict | None

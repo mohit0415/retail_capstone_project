@@ -239,7 +239,7 @@ def test_a_rag_answer_leaves_the_rag_stage_cited_on_every_sentence(monkeypatch, 
         cited_clauses=[f"{TITLE} §1", f"{TITLE} §4"],
     )
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([PURPOSE, SCOPE, GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([PURPOSE, SCOPE, GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     state = base_state("What does the anti-bribery policy say about gifts?", access_scopes=SCOPES)
@@ -255,7 +255,7 @@ def test_the_rag_writer_saying_the_extracts_do_not_answer_becomes_i_dont_know(mo
 
     draft = DraftAnswer(answer="I don't know - the policy extracts do not cover this.", answer_found=False)
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     state = base_state("What is the parking allowance for store staff?", access_scopes=SCOPES)
@@ -271,7 +271,7 @@ def test_a_user_who_asked_for_a_human_still_gets_a_draft_for_the_reviewer(monkey
 
     draft = DraftAnswer(answer="I don't know - the policy extracts do not cover this.", answer_found=False)
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     state = base_state("What is the parking allowance? I need a legal review.", access_scopes=SCOPES)
@@ -286,7 +286,7 @@ def test_a_user_who_asked_for_a_human_still_gets_a_draft_for_the_reviewer(monkey
 def test_on_the_hybrid_and_panel_routes_the_rag_stage_only_gathers_the_clauses(route, monkeypatch, no_db, no_tracing):
     from src.nodes import rag_path
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", lambda node, state: pytest.fail("the rag stage wrote a draft"))
 
     state = base_state("Is vendor 7 approved and may we accept its gift?", access_scopes=SCOPES, routed_path=route)
@@ -339,7 +339,11 @@ def test_the_panel_route_hands_the_rows_to_the_panel(monkeypatch, no_db, no_trac
     from src.nodes import nl2sql_path
 
     monkeypatch.setattr(nl2sql_path, "run_sql_evidence", lambda state: (EVIDENCE, ""))
-    monkeypatch.setattr(nl2sql_path, "model_for", lambda _name: pytest.fail("the records stage narrated for the panel"))
+    monkeypatch.setattr(
+        nl2sql_path,
+        "model_for_long_output",
+        lambda _name, _timeout: pytest.fail("the records stage narrated for the panel"),
+    )
 
     state = base_state(
         "Can we override approval for Critical vendor 7?",
@@ -352,6 +356,51 @@ def test_the_panel_route_hands_the_rows_to_the_panel(monkeypatch, no_db, no_trac
     assert result["sql_evidence"] is EVIDENCE
     assert "draft" not in result
     assert routing.after_nl2sql_path({**state, **result}) == "multi_agent_panel"
+
+
+def test_a_narration_timeout_degrades_to_the_deterministic_row_reading_not_a_500(monkeypatch, no_db, no_tracing):
+    from src.nodes import nl2sql_path
+
+    monkeypatch.setattr(nl2sql_path, "run_sql_evidence", lambda state: (EVIDENCE, ""))
+
+    def _timeout(*args, **kwargs):
+        raise TimeoutError("Request timed out.")
+
+    monkeypatch.setattr(nl2sql_path, "narrate_sql", _timeout)
+
+    state = base_state("Is vendor 7 approved?", access_scopes=SCOPES, routed_path="nl2sql")
+    result = nl2sql_path.nl2sql_path_node(state)
+
+    # the fetched rows are released as a degraded, verbatim reading instead of raising
+    assert result["degraded"] is True
+    assert result["sql_evidence"] is EVIDENCE
+    assert "1 row(s)" in result["draft"].answer
+    assert "approval_status=Approved" in result["draft"].answer
+    assert result["draft"].uncertainty_note
+    assert routing.after_nl2sql_path({**state, **result}) == "compliance_validation"
+
+
+def test_the_fallback_narration_of_a_wide_result_passes_the_figure_sanity_check(no_db):
+    """The first fallback said '55 further row(s)' (60 - 5), a figure the deterministic
+    grounding check cannot find in the rows - it failed validation and sent the request
+    round a repair loop that exhausted the deadline. The fallback may only state figures
+    the rows support."""
+    from src.nodes.nl2sql_path import _fallback_narration
+    from src.sqlpath.grounding import unsupported_figures
+
+    wide = SqlEvidence(
+        template_id="generated",
+        statement="SELECT ...",
+        parameters={},
+        row_count=60,
+        rows=[{"vendor_id": i, "department": f"Dept {i % 4}", "retention_years": 7} for i in range(60)],
+        as_of=date(2025, 12, 31),
+    )
+
+    draft = _fallback_narration(wide)
+
+    assert "60 row(s)" in draft.answer
+    assert unsupported_figures(wide, draft.answer) == []
 
 
 def test_a_records_route_with_no_evidence_is_an_honest_no_answer_not_an_escalation(monkeypatch, no_db, no_tracing):
@@ -869,7 +918,7 @@ def test_a_cited_partial_answer_is_kept_even_if_the_writer_says_not_found(monkey
         answer_found=False,
     )
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     result = rag_path.rag_path_node(base_state("gift and parking rules", access_scopes=SCOPES))
@@ -883,7 +932,7 @@ def test_a_draft_that_only_names_gaps_becomes_i_dont_know(monkeypatch, no_db, no
 
     draft = DraftAnswer(answer="The extracts do not specify a parking allowance for store staff.")
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     result = rag_path.rag_path_node(base_state("parking allowance?", access_scopes=SCOPES))
@@ -895,7 +944,7 @@ def test_a_draft_that_only_names_gaps_becomes_i_dont_know(monkeypatch, no_db, no
 def test_an_empty_retrieval_is_i_dont_know_without_a_model_call(monkeypatch, no_db, no_tracing):
     from src.nodes import rag_path
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([], False, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([], False, [], []))
     monkeypatch.setattr(rag_path, "routed_model", lambda node, state: pytest.fail("answer model called on nothing"))
 
     state = base_state("What is the parking allowance?", access_scopes=SCOPES)
@@ -938,7 +987,7 @@ def test_a_question_the_chosen_policy_matches_is_not_refused_as_off_topic(monkey
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
     # just above the no-match ceiling: enough when the user picked the policy, not without the chip
     monkeypatch.setattr(
-        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("1", "Purpose", "p", score=0.07)], [])
+        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("1", "Purpose", "p", score=0.07)], [], [])
     )
 
     chosen = base_state(
@@ -965,7 +1014,7 @@ def test_a_question_the_chosen_policy_matches_is_not_refused_as_off_topic(monkey
 )
 def test_a_creative_or_injection_request_is_refused_even_with_a_policy_chosen(question, monkeypatch, no_db, no_tracing):
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
-    monkeypatch.setattr(module, "gather_policy_evidence", lambda state, widen=False: ([PURPOSE], []))
+    monkeypatch.setattr(module, "gather_policy_evidence", lambda state, widen=False: ([PURPOSE], [], []))
 
     state = base_state(question, access_scopes=SCOPES, document_scope_request=["anti_bribery_policy"])
 
@@ -975,7 +1024,7 @@ def test_a_creative_or_injection_request_is_refused_even_with_a_policy_chosen(qu
 def test_a_chosen_policy_that_does_not_match_is_still_refused(monkeypatch, no_db, no_tracing):
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
     monkeypatch.setattr(
-        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("9", "Misc", "unrelated", score=0.01)], [])
+        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("9", "Misc", "unrelated", score=0.01)], [], [])
     )
 
     state = base_state("who won the cricket match", access_scopes=SCOPES, document_scope_request=["anti_bribery_policy"])
@@ -986,7 +1035,7 @@ def test_a_chosen_policy_that_does_not_match_is_still_refused(monkeypatch, no_db
 def test_without_a_cross_encoder_score_only_a_chosen_policy_rescues(monkeypatch, no_db, no_tracing):
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
     monkeypatch.setattr(
-        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("1", "Purpose", "p", score=None)], [])
+        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("1", "Purpose", "p", score=None)], [], [])
     )
 
     question = "Tell about the investigation and escaltaion principles"
@@ -1002,7 +1051,7 @@ def test_without_a_cross_encoder_score_only_a_chosen_policy_rescues(monkeypatch,
 
 def test_a_refused_question_the_policies_clearly_answer_goes_to_rag(monkeypatch, no_db, no_tracing):
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
-    monkeypatch.setattr(module, "gather_policy_evidence", lambda state, widen=False: ([PURPOSE], []))
+    monkeypatch.setattr(module, "gather_policy_evidence", lambda state, widen=False: ([PURPOSE], [], []))
 
     result = module.intent_classification_node(
         base_state("Tell about the investigation and escaltaion principles", access_scopes=SCOPES)
@@ -1015,7 +1064,7 @@ def test_a_refused_question_the_policies_clearly_answer_goes_to_rag(monkeypatch,
 def test_a_question_nothing_in_the_policies_touches_is_still_refused(monkeypatch, no_db, no_tracing):
     module = _classified_as(monkeypatch, Intent.OUT_OF_SCOPE)
     monkeypatch.setattr(
-        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("9", "Misc", "unrelated", score=0.01)], [])
+        module, "gather_policy_evidence", lambda state, widen=False: ([_chunk("9", "Misc", "unrelated", score=0.01)], [], [])
     )
 
     result = module.intent_classification_node(base_state("who won the cricket match yesterday", access_scopes=SCOPES))
@@ -1216,7 +1265,7 @@ def test_a_clause_split_across_two_extracts_is_one_clause_not_two_rivals():
 def test_an_i_dont_know_draft_is_never_released_with_a_citation_stamped_on(draft, monkeypatch, no_db, no_tracing):
     from src.nodes import rag_path
 
-    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, []))
+    monkeypatch.setattr(rag_path, "retrieve_policy_evidence", lambda **kwargs: ([GIFTS], True, [], []))
     monkeypatch.setattr(rag_path, "routed_model", _writer(draft))
 
     result = rag_path.rag_path_node(base_state("parking allowance?", access_scopes=SCOPES))

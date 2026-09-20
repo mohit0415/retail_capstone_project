@@ -10,9 +10,10 @@ import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from configs.llms import model_for
+from configs.llms import model_for_long_output
 from configs.settings import settings
 from src.auth.rbac import allowed_risk_categories, allowed_tables
+from src.core.budget import guard_from_state
 from src.graph.routing import (
     HYBRID_REDRAFT,
     NOT_FOUND_NO_EVIDENCE,
@@ -37,6 +38,13 @@ logger = logging.getLogger(__name__)
 # the narration model sees every row it reports (up to this cap) with the row count in front;
 # it used to see 25 rows of a 31-row result and could not name the other six
 NARRATION_MAX_ROWS = 60
+
+# narrating a wide result ("list all 60 records with 8 columns") is a completion of thousands
+# of tokens; the default per-call timeout aborted every attempt mid-stream. One attempt runs
+# with the remaining route budget (up to this ceiling), keeping this much back for validation.
+NARRATION_TIMEOUT_CEILING_SECONDS = 75.0
+NARRATION_TIMEOUT_FLOOR_SECONDS = 15.0
+NARRATION_VALIDATION_RESERVE_SECONDS = 15.0
 
 # A hybrid or high-risk question is often two questions in one: "how often must a Low risk vendor be
 # monitored under the vendor policy, and which of our vendors are Low risk?". The records query gets
@@ -171,7 +179,12 @@ def narrate_sql(state: AgentState, evidence: SqlEvidence, repair_directive: str 
 
     messages.append(HumanMessage(content=state["standalone_query"]))
 
-    model = model_for("nl2sql_intent").with_structured_output(DraftAnswer)
+    remaining = guard_from_state(state).seconds_remaining
+    timeout = min(
+        NARRATION_TIMEOUT_CEILING_SECONDS,
+        max(NARRATION_TIMEOUT_FLOOR_SECONDS, remaining - NARRATION_VALIDATION_RESERVE_SECONDS),
+    )
+    model = model_for_long_output("nl2sql_intent", timeout).with_structured_output(DraftAnswer)
 
     draft: DraftAnswer = model.invoke(messages, config=runnable_config(state, "sql_narration"))
 
@@ -282,6 +295,41 @@ def _reconcile_with_policy(state: AgentState) -> dict:
     }
 
 
+def _fallback_narration(evidence: SqlEvidence) -> DraftAnswer:
+    """A deterministic reading of the rows for when the narration model does not answer.
+
+    The rows are already fetched and scope-filtered; failing the whole request over a
+    narration timeout would discard real evidence. This states the count and the leading
+    rows verbatim - no interpretation, so nothing can be hallucinated - and the request
+    is released as degraded instead of raising a 500.
+    """
+    shown = evidence.rows[:5]
+    listed = "; ".join(", ".join(f"{key}={value}" for key, value in row.items()) for row in shown)
+
+    answer = (
+        f"As of {evidence.as_of}, the compliance records return {evidence.row_count} row(s) "
+        "for this question."
+    )
+
+    if listed:
+        answer += f" Leading rows: {listed}."
+
+    if evidence.row_count > len(shown):
+        # no arithmetic here: "55 further rows" is a figure the deterministic sanity check
+        # cannot find in the rows, and it sent the first fallback round a repair loop
+        answer += " The remaining rows are not listed here; the row count above is the full total."
+
+    answer, _ = with_disclosures(evidence, answer)
+
+    return DraftAnswer(
+        answer=answer,
+        uncertainty_note=(
+            "the narration model did not respond in time; this is a direct, unnarrated "
+            "reading of the query result"
+        ),
+    )
+
+
 def _records_answer(state: AgentState) -> dict:
     """nl2sql route: the rows are the answer."""
     repair = is_sql_repair_pass(state)
@@ -320,13 +368,31 @@ def _records_answer(state: AgentState) -> dict:
 
     _log_evidence(state, evidence, EvidencePath.NL2SQL.value, repair)
 
-    draft = narrate_sql(state, evidence, repair_directive=state.get("replan_directive", "") if repair else "")
+    degraded = False
+
+    try:
+        draft = narrate_sql(state, evidence, repair_directive=state.get("replan_directive", "") if repair else "")
+    except Exception:
+        # an Azure timeout here used to raise out of the graph and turn the whole /ask
+        # into a 500, with the rows already fetched; the deterministic reading releases
+        # the evidence instead
+        logger.warning(
+            "sql narration failed request_id=%s template=%s rows=%d - releasing the deterministic "
+            "row reading as a degraded answer",
+            state.get("request_id"),
+            evidence.template_id,
+            evidence.row_count,
+            exc_info=True,
+        )
+        draft = _fallback_narration(evidence)
+        degraded = True
 
     return {
         "evidence_path": EvidencePath.NL2SQL.value,
         "sql_evidence": evidence,
         "sql_failure": "",
         "draft": draft,
+        "degraded": degraded or state.get("degraded", False),
         "tokens_spent": 1500,
     }
 
